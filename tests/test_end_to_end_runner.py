@@ -45,8 +45,8 @@ def _make_synthetic_case(
         hu_intercept=np.array(0.0),
     )
     if win_path is not None:
-        win = ((np.clip(hu.astype(np.float64), -160.0, 240.0) + 160.0) / 400.0 * 255.0).astype(
-            np.uint8
+        win = ((np.clip(hu.astype(np.float64), -160.0, 240.0) + 160.0) / 400.0).astype(
+            np.float32
         )
         np.savez_compressed(
             win_path,

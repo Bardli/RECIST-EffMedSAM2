@@ -1,9 +1,10 @@
-"""Decode preserved NIfTI intensities; window only at the SAM model boundary."""
+"""Decode preserved NIfTI intensities; window continuously in float32 at the SAM boundary."""
 from __future__ import annotations
 
 import numpy as np
 
 ENCODING = "nifti_stored_scaled_v1"
+_UNIT_TOL = 1e-5
 
 
 def raw_hu(data) -> np.ndarray:
@@ -21,16 +22,37 @@ def raw_hu(data) -> np.ndarray:
 
 
 def abdomen_image(data, require_raw: bool = False) -> np.ndarray:
-    """Return a uint8 (D, H, W) volume in [0, 255] using L40/W400 [-160, 240] when raw HU is present."""
+    """Return a float32 (D, H, W) volume in [0.0, 1.0], applying L40/W400 [-160, 240] when raw HU is present."""
     if "intensity_encoding" in data:
         hu = raw_hu(data)
-        return ((np.clip(hu, -160.0, 240.0) + 160.0) / 400.0 * 255.0).astype(np.uint8)
+        return ((np.clip(hu, -160.0, 240.0) + 160.0) / 400.0).astype(np.float32)
     if require_raw:
         raise ValueError("Strict raw-HU mode requires preserved nifti_stored_scaled_v1 intensities")
-    image = data["imgs"]
-    if image.dtype != np.uint8 or image.ndim != 3:
-        raise ValueError("Windowed SAM input must be a 3D uint8 volume")
-    return image
+    image = np.asarray(data["imgs"])
+    if image.ndim != 3 or image.size == 0:
+        raise ValueError(f"Windowed/normalized SAM input must be a non-empty 3D volume, got shape {image.shape}")
+    if image.dtype == np.uint8:
+        return (image.astype(np.float32) / 255.0).astype(np.float32, copy=False)
+    if np.issubdtype(image.dtype, np.floating):
+        if not np.isfinite(image).all():
+            raise ValueError("Non-finite SAM input intensities")
+        vmin = float(image.min())
+        vmax = float(image.max())
+        if vmin < -_UNIT_TOL:
+            raise ValueError(
+                f"Floating SAM input must be normalized in [0, 1] or [0, 255]; got min={vmin}"
+            )
+        if vmax <= 1.0 + _UNIT_TOL:
+            return np.clip(image.astype(np.float32, copy=False), 0.0, 1.0).astype(np.float32, copy=False)
+        if vmax <= 255.0 + _UNIT_TOL:
+            return np.clip(image.astype(np.float32) / 255.0, 0.0, 1.0).astype(np.float32, copy=False)
+        raise ValueError(
+            f"Floating SAM input must be normalized in [0, 1] or [0, 255]; got max={vmax}"
+        )
+    raise ValueError(
+        f"Windowed/normalized SAM input must be a 3D float ([0, 1] or [0, 255]) or uint8 volume, "
+        f"got dtype={image.dtype}"
+    )
 
 
 def nninteractive_image(data, require_raw: bool = False) -> np.ndarray:

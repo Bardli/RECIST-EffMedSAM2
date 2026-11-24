@@ -183,14 +183,20 @@ def prompt_points(recist_per_lab: np.ndarray, prompt: str) -> np.ndarray:
 
 
 def resize_grayscale_to_rgb_and_resize(array: np.ndarray, image_size: int) -> np.ndarray:
-    """Convert ``(D, H, W)`` uint8 grayscale volume to ``(D, 3, image_size, image_size)``."""
-    from PIL import Image
+    """Resize a ``(D, H, W)`` float32 volume to ``(D, 3, image_size, image_size)`` without uint8 truncation."""
+    import cv2
 
-    d = array.shape[0]
-    out = np.zeros((d, 3, image_size, image_size), dtype=np.float32)
+    omp = os.environ.get("OMP_NUM_THREADS")
+    if omp and omp.isdigit():
+        n_threads = int(omp)
+        cv2.setNumThreads(0 if n_threads <= 1 else n_threads)
+
+    arr = np.asarray(array, dtype=np.float32)
+    d = arr.shape[0]
+    out = np.empty((d, 3, image_size, image_size), dtype=np.float32)
     for i in range(d):
-        img = Image.fromarray(array[i].astype(np.uint8)).convert("RGB")
-        out[i] = np.array(img.resize((image_size, image_size))).transpose(2, 0, 1)
+        resized = cv2.resize(arr[i], (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+        out[i] = np.clip(resized, 0.0, 1.0)
     return out
 
 
@@ -370,8 +376,12 @@ def run_case(
                         img_3d_ori = abdomen_image(npz_data, require_raw=require_raw_hu)
                 if img_3d_ori.shape != recist.shape:
                     raise ValueError(f"Image shape {img_3d_ori.shape} != RECIST shape {recist.shape}")
-                if np.max(img_3d_ori) >= 256:
-                    raise ValueError("SAM input image intensities must lie in [0, 255]")
+                if (
+                    not np.isfinite(img_3d_ori).all()
+                    or float(np.min(img_3d_ori)) < -1e-5
+                    or float(np.max(img_3d_ori)) > 1.0 + 1e-5
+                ):
+                    raise ValueError("SAM input image intensities must be finite float32 values in [0, 1]")
 
             # 3. Resize + RGB + ImageNet normalization (excluded from runtime_s)
             with profiler.phase("preprocess"):
@@ -379,8 +389,8 @@ def run_case(
                 if (video_height, video_width) != (IMAGE_SIZE, IMAGE_SIZE):
                     img_resized = resize_grayscale_to_rgb_and_resize(img_3d_ori, IMAGE_SIZE)
                 else:
-                    img_resized = img_3d_ori[:, None].repeat(3, axis=1).astype(np.float32)
-                img_tensor = torch.from_numpy(img_resized / 255.0)
+                    img_resized = np.repeat(img_3d_ori[:, None], 3, axis=1).astype(np.float32, copy=False)
+                img_tensor = torch.from_numpy(img_resized)
                 img_mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32)[:, None, None]
                 img_std = torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
                 img_tensor -= img_mean
@@ -595,7 +605,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--shift", type=int, default=0)
     ap.add_argument("--gt-key", choices=("auto", "gts", "gts_hidden"), default="auto")
     ap.add_argument("--gts-path", type=str, default=None)
-    ap.add_argument("--window-dir", type=Path, default=None, help="Optional uint8 window twin directory")
+    ap.add_argument(
+        "--window-dir",
+        type=Path,
+        default=None,
+        help="Optional pre-windowed/normalized (float32 or uint8) twin directory",
+    )
     ap.add_argument("--require-raw-hu", action="store_true")
     ap.add_argument("--disable-image-encoder-compile", action="store_true")
     ap.add_argument("--num-threads", type=int, default=1)

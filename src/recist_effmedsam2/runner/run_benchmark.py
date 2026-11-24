@@ -383,7 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-dir",
         type=Path,
         default=None,
-        help=f"Optional uint8 window twin dir for SAM (auto-detected at {DEFAULT_WINDOW_DIR} if present)",
+        help=(
+            f"Optional pre-windowed/normalized (float32 or uint8) twin dir for SAM "
+            f"(auto-detected at {DEFAULT_WINDOW_DIR} if present)"
+        ),
     )
     ap.add_argument("--no-window-dir", action="store_true", help="Disable auto-detection of data/window_twins")
     ap.add_argument("--models-config", type=Path, default=None, help="Optional models.json override")

@@ -96,9 +96,9 @@ Check whether `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and `asse
 Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to confirm keys, shape, dtype, and `ct_inputs.py` compatibility:
 - Expected arrays: `imgs` `(Z, Y, X)`, `recist` integer `(Z, Y, X)`, `spacing` `(3,)` `[sx, sy, sz]` in mm, and optional `gts` (or `gts_hidden`).
 - Both dataset channels are supported in `src/recist_effmedsam2/ct_inputs.py`:
-  - **HU channel:** `intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept` (decoded to float64 HU by `raw_hu()`/`nninteractive_image()`, and windowed L40/W400 by `abdomen_image()`), or unencoded raw `imgs` passed through by `nninteractive_image(..., require_raw=False)`.
-  - **Normalized / pre-windowed channel (`uint8` in `[0, 255]`):** accepted directly by `abdomen_image(..., require_raw=False)` (and `nninteractive_image(..., require_raw=False)`), or supplied alongside HU inputs via `data/window_twins/` / `--window-dir`.
-- Pass `--require-raw-hu` on `recist-benchmark` only when strictly enforcing `nifti_stored_scaled_v1` HU decoding and rejecting pre-windowed `uint8` inputs.
+  - **HU channel:** `intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept` (decoded to `float64` HU by `raw_hu()`/`nninteractive_image()`, and continuously windowed to `float32 [0.0, 1.0]` L40/W400 by `abdomen_image()` without `uint8` truncation), or unencoded raw `imgs` passed through by `nninteractive_image(..., require_raw=False)`.
+  - **Normalized / pre-windowed channel (`float32` or legacy `uint8`):** `float32` in `[0.0, 1.0]` or `[0.0, 255.0]` (kept at full `float32` precision through bilinear `cv2.resize`), or legacy `uint8` in `[0, 255]`, accepted by `abdomen_image(..., require_raw=False)` or supplied alongside HU inputs via `data/window_twins/` / `--window-dir`.
+- Pass `--require-raw-hu` on `recist-benchmark` only when strictly enforcing `nifti_stored_scaled_v1` HU decoding and rejecting pre-windowed inputs.
 
 ### Step 6: Run 1-Case Smoke Test & Audit Telemetry
 Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots`:
@@ -159,12 +159,12 @@ Each `(model, case)` pair runs sequentially in an isolated Python subprocess (`r
 6. **GPU monitoring status semantics:** Never conflate unmeasured/failed NVML queries (`None` -> blank CSV cell; `gpu_monitor_status` in `{"unavailable", "query_failed", "partial"}`) with a verified `0.0 MiB` measurement (`gpu_monitor_status == "measured"`).
 
 ### 2. Input Channels: HU & Normalized/Windowed
-`src/recist_effmedsam2/ct_inputs.py` keeps both the HU channel and the normalized/pre-windowed channel open:
+`src/recist_effmedsam2/ct_inputs.py` keeps both the HU channel and the normalized/pre-windowed channel open at full `float32` precision:
 - **HU channel:**
-  - `nifti_stored_scaled_v1` (`intensity_encoding`, `hu_slope`, `hu_intercept`): `raw_hu()` and `nninteractive_image()` reconstruct float64 HU; `abdomen_image()` windows HU to L40/W400 (`[-160, 240]` -> `uint8 [0, 255]`).
+  - `nifti_stored_scaled_v1` (`intensity_encoding`, `hu_slope`, `hu_intercept`): `raw_hu()` and `nninteractive_image()` reconstruct `float64` HU; `abdomen_image()` windows HU continuously to `float32 [0.0, 1.0]` (`L40/W400 [-160, 240]`, without `uint8` truncation).
   - Direct/unencoded `imgs`: `nninteractive_image(..., require_raw=False)` passes `data["imgs"]` through (e.g., direct `int16` HU paired with `--window-dir`).
-- **Normalized / pre-windowed channel (`uint8` `[0, 255]`):** accepted directly by `abdomen_image(..., require_raw=False)` and `nninteractive_image(..., require_raw=False)`, or supplied separately for SAM via `data/window_twins/` / `--window-dir`.
-- **Strict mode (`--require-raw-hu`):** enforces `nifti_stored_scaled_v1` HU decoding and rejects pre-windowed `uint8` inputs.
+- **Normalized / pre-windowed channel (`float32` or legacy `uint8`):** `float32` in `[0.0, 1.0]` / `[0.0, 255.0]` (resized in `float32` via bilinear `cv2.resize`) or legacy `uint8 [0, 255]`, accepted directly by `abdomen_image(..., require_raw=False)` and `nninteractive_image(..., require_raw=False)` or supplied separately for SAM via `data/window_twins/` / `--window-dir`.
+- **Strict mode (`--require-raw-hu`):** enforces `nifti_stored_scaled_v1` HU decoding and rejects pre-windowed inputs.
 
 ### 3. Public Repo Hygiene
 - Never commit patient CT scans, real case identifiers, private manifests, model weights (`.pt`/`.pth`), `.npz`/`.nii.gz` files, outputs (`runs/`), secrets, or internal filesystem/cluster paths.
