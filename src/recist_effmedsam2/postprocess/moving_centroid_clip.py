@@ -6,6 +6,8 @@ exempt so their predictions pass through untouched.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -259,3 +261,122 @@ def apply_moving_centroid_to_channels(
         clipped[idx] = ch
         rows.append(row)
     return clipped, rows
+
+
+def apply_moving_centroid_to_writer(
+    writer,
+    *,
+    scratch: str | Path | None = None,
+    endpoints: dict[int, dict] | None = None,
+    exempt_ids: set[int] | None = None,
+):
+    """Apply moving-centroid clipping directly from an ``IndependentPredictionWriter``'s
+    disk-backed channels into a new ``IndependentPredictionWriter`` without NPZ reload.
+    """
+    from ..storage import IndependentPredictionWriter
+
+    endpoints = endpoints or {}
+    exempt_ids = exempt_ids or set()
+    post_meta = {**writer.metadata, "postprocess": "moving_centroid"}
+    post_writer = IndependentPredictionWriter(
+        shape=writer.shape,
+        recist=writer.recist,
+        spacing=writer.spacing,
+        gt=writer.gt,
+        metadata=post_meta,
+        scratch=scratch,
+    )
+    actions: list[dict] = []
+    try:
+        for lab in writer.ids:
+            if lab not in writer.prompt_ids:
+                actions.append(
+                    dict(
+                        label=int(lab),
+                        seed_z="",
+                        radius_mm="",
+                        prompt_length_mm="",
+                        status="no_recist",
+                        action="preserved",
+                        removed_voxels=0,
+                        affected_slices=0,
+                    )
+                )
+                continue
+            post_writer.mark_attempted(lab)
+            clipped, row = xy_centroid_clip_channel(
+                writer.channels[lab],
+                writer.recist,
+                int(lab),
+                writer.spacing,
+                endpoint=endpoints.get(int(lab)),
+                exempt=int(lab) in exempt_ids,
+            )
+            post_writer.write_volume(lab, clipped)
+            actions.append(row)
+    except BaseException:
+        post_writer.close()
+        raise
+    return post_writer, actions
+
+
+def build_postprocessed_rows(
+    post_receipt: dict,
+    post_actions: list[dict],
+) -> list[dict]:
+    """Pair ``IndependentPredictionWriter.save()`` receipt rows with clip actions."""
+    action_by_id = {int(a["label"]): a for a in post_actions}
+    rows: list[dict] = []
+    for r in post_receipt.get("rows", []):
+        lab = int(r["gt_id"])
+        act = action_by_id.get(lab, {})
+        rows.append(
+            dict(
+                gt_id=lab,
+                post_pred_voxels=r.get("pred_voxels"),
+                post_intersection=r.get("intersection"),
+                post_dice=r.get("dice"),
+                post_action=act.get("action", ""),
+                post_removed_voxels=act.get("removed_voxels", 0),
+            )
+        )
+    return rows
+
+
+def finalize_and_save_predictions(
+    writer,
+    output_npz: str | Path,
+    *,
+    profiler,
+    postprocess: str = "none",
+    overwrite: bool = False,
+    scratch: str | Path | None = None,
+) -> tuple[dict, Path | None, list[dict]]:
+    """Run optional postprocessing and save raw (+ postprocessed) NPZs inside ``profiler``."""
+    post_writer = None
+    post_actions: list[dict] = []
+    try:
+        if postprocess == "moving_centroid":
+            with profiler.phase("postprocess"):
+                post_writer, post_actions = apply_moving_centroid_to_writer(
+                    writer,
+                    scratch=scratch,
+                )
+        elif postprocess != "none":
+            raise ValueError(f"Unsupported postprocess mode: {postprocess!r}")
+
+        with profiler.phase("save"):
+            receipt = writer.save(output_npz, overwrite=overwrite)
+            post_npz: Path | None = None
+            post_rows: list[dict] = []
+            if post_writer is not None:
+                out_p = Path(output_npz)
+                post_npz = out_p.parent.parent / "predictions_postprocessed" / out_p.name
+                post_receipt = post_writer.save(post_npz, overwrite=overwrite)
+                post_rows = build_postprocessed_rows(post_receipt, post_actions)
+        return receipt, post_npz, post_rows
+    finally:
+        if post_writer is not None:
+            post_writer.close()
+
+

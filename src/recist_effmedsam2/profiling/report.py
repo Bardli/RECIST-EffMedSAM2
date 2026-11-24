@@ -15,6 +15,7 @@ _PHASE_COLORS = {
     "data_load": ("#6b7280", "data_load"),
     "preprocess": ("#8b5cf6", "preprocess"),
     "inference": ("#10b981", "inference"),
+    "postprocess": ("#ec4899", "postprocess"),
     "save": ("#3b82f6", "save"),
 }
 
@@ -33,9 +34,10 @@ def load_metric_records(
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Skipping unreadable metrics file %s: %s", path, exc)
             continue
-        if gpu_tolerance_mb is not None and "MaxGPU_Mem_MB" in record.get("metrics", {}):
+        max_gpu = record.get("metrics", {}).get("MaxGPU_Mem_MB")
+        if gpu_tolerance_mb is not None and max_gpu is not None:
             record["metrics"]["RankGPU_Mem_MB"] = ranking_gpu_memory(
-                record["metrics"]["MaxGPU_Mem_MB"],
+                max_gpu,
                 gpu_tolerance_mb,
             )
             record["gpu_memory_tolerance_mb"] = gpu_tolerance_mb
@@ -69,11 +71,14 @@ def plot_case(record: dict[str, Any], plots_dir: Path) -> list[Path]:
     written: list[Path] = []
     for key, ylabel, filename in series:
         values = samples.get(key) or []
-        if not values:
+        pairs = [(t, v) for t, v in zip(seconds, values) if v is not None]
+        if not pairs:
             continue
+        xs = [t for t, _ in pairs]
+        ys = [float(v) for _, v in pairs]
+
         fig, ax = plt.subplots(figsize=(6.5, 3.6))
-        n = min(len(seconds), len(values))
-        ax.plot(seconds[:n], values[:n], color="#1d4ed8", linewidth=1.6)
+        ax.plot(xs, ys, color="#1d4ed8", linewidth=1.6)
         labeled_phases: set[str] = set()
         for phase, spans in phase_spans.items():
             color, label = _PHASE_COLORS.get(phase, ("#9ca3af", phase))
@@ -82,7 +87,8 @@ def plot_case(record: dict[str, Any], plots_dir: Path) -> list[Path]:
                 labeled_phases.add(phase)
                 ax.axvspan(t0, t1, color=color, alpha=0.12, label=lbl)
         tolerance = record.get("gpu_memory_tolerance_mb")
-        if key == "gpu_mb" and tolerance and float(record.get("metrics", {}).get("MaxGPU_Mem_MB", 0)) > 0:
+        max_gpu = record.get("metrics", {}).get("MaxGPU_Mem_MB")
+        if key == "gpu_mb" and tolerance and max_gpu is not None and float(max_gpu) > 0:
             ax.axhline(
                 float(tolerance),
                 color="#dc2626",
@@ -95,7 +101,7 @@ def plot_case(record: dict[str, Any], plots_dir: Path) -> list[Path]:
         title_prefix = f"{model} - " if model else ""
         ax.set_title(f"{title_prefix}{case_id} ({record.get('device', '')})", fontsize=9)
         ax.grid(alpha=0.3)
-        if labeled_phases or (key == "gpu_mb" and tolerance):
+        if labeled_phases or (key == "gpu_mb" and tolerance and max_gpu is not None and float(max_gpu) > 0):
             ax.legend(fontsize=7, loc="upper right")
         fig.tight_layout()
         out_path = plots_dir / filename

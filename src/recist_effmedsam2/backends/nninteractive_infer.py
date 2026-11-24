@@ -20,7 +20,8 @@ from typing import Any
 import numpy as np
 
 from ..ct_inputs import nninteractive_image
-from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, CaseProfiler
+from ..postprocess import finalize_and_save_predictions
+from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, CaseProfiler, write_json_atomic
 from ..profiling.report import plot_case
 from ..prompts import (
     MASK_MODES,
@@ -145,14 +146,6 @@ def build_session(
     return session
 
 
-def _parse_gpu_index(device: str) -> int | None:
-    if device == "cpu":
-        return None
-    if ":" in device:
-        return int(device.split(":", 1)[1])
-    return 0
-
-
 def run_case(
     *,
     input_npz: str | Path,
@@ -162,6 +155,7 @@ def run_case(
     checkpoint: str | None = None,
     expect_model: str = OFFICIAL_MODEL_DATASET_NAME,
     device: str = "cpu",
+    gpu_index: int | None = None,
     interaction: str = "batch",
     scribble_stroke: str = "board",
     scribble_inset: float = 0.0,
@@ -173,6 +167,7 @@ def run_case(
     plots_dir: str | Path | None = None,
     model_name: str | None = None,
     dataset_name: str | None = None,
+    postprocess: str = "none",
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run fresh-session nnInteractive inference and efficiency profiling for one case."""
@@ -220,205 +215,240 @@ def run_case(
     input_path = Path(input_npz).resolve()
     case_id = input_path.stem
     eff_model_name = model_name or f"nninteractive_{prompt_mode}"
+    metrics_path = Path(metrics_json)
 
     with CaseProfiler(
         device=device,
-        gpu_index=_parse_gpu_index(device),
+        gpu_index=gpu_index,
         sample_interval=sample_interval,
         gpu_tolerance_mb=gpu_tolerance_mb,
     ) as profiler:
-        # 1. Model load (counted in runtime_s)
-        with profiler.phase("model_load"):
-            session = build_session(checkpoint_dir, device=device, num_threads=num_threads)
+        session = None
+        try:
+            # 1. Model load (counted in runtime_s)
+            with profiler.phase("model_load"):
+                session = build_session(checkpoint_dir, device=device, num_threads=num_threads)
 
-        # 2. Data load & decompression (excluded from runtime_s)
-        with profiler.phase("data_load"):
-            with np.load(input_path, allow_pickle=False) as data:
-                imgs = nninteractive_image(data, require_raw=require_raw_hu)
-                recist = np.asarray(data["recist"])
-                spacing = np.asarray(data["spacing"])
-                gts = None
-                for k in ("gts", "gts_hidden"):
-                    if k in data.files:
-                        gts = np.asarray(data[k])
-                        break
+            # 2. Data load & decompression (excluded from runtime_s)
+            with profiler.phase("data_load"):
+                with np.load(input_path, allow_pickle=False) as data:
+                    imgs = nninteractive_image(data, require_raw=require_raw_hu)
+                    recist = np.asarray(data["recist"])
+                    spacing = np.asarray(data["spacing"])
+                    gts = None
+                    for k in ("gts", "gts_hidden"):
+                        if k in data.files:
+                            gts = np.asarray(data[k])
+                            break
 
-        # 3. Asynchronous set_image + target buffer setup (excluded from runtime_s)
-        with profiler.phase("preprocess"):
-            session.set_image(imgs[None].astype(np.float32))
-            target_buffer = torch.zeros(imgs.shape, dtype=torch.uint8, device="cpu")
-            session.set_target_buffer(target_buffer)
-            if hasattr(session, "_finish_preprocessing_and_initialize_interactions"):
-                session._finish_preprocessing_and_initialize_interactions()
+            # 3. Asynchronous set_image + target buffer setup (excluded from runtime_s)
+            with profiler.phase("preprocess"):
+                session.set_image(imgs[None].astype(np.float32))
+                target_buffer = torch.zeros(imgs.shape, dtype=torch.uint8, device="cpu")
+                session.set_target_buffer(target_buffer)
+                if hasattr(session, "_finish_preprocessing_and_initialize_interactions"):
+                    session._finish_preprocessing_and_initialize_interactions()
 
-        unique_labs = [int(x) for x in np.unique(recist) if x != 0]
-        is_mask_mode = prompt_mode in MASK_MODES
-        is_recist_neg_mode = prompt_mode in RECIST_NEG_MODES
-        if is_mask_mode and gts is None:
-            raise ValueError(f"Mask prompt mode {prompt_mode!r} requires GT volume")
+            unique_labs = [int(x) for x in np.unique(recist) if x != 0]
+            is_mask_mode = prompt_mode in MASK_MODES
+            is_recist_neg_mode = prompt_mode in RECIST_NEG_MODES
+            if is_mask_mode and gts is None:
+                raise ValueError(f"Mask prompt mode {prompt_mode!r} requires GT volume")
 
-        metadata = {
-            "dataset": dataset_name or "",
-            "case_id": case_id,
-            "model": eff_model_name,
-            "prompt_mode": prompt_mode,
-            "interaction": interaction,
-            "scribble_stroke": scribble_stroke,
-            "scribble_inset": scribble_inset,
-            "device": str(session.device),
-            "num_threads": int(torch.get_num_threads()),
-            "source_npz": str(input_path),
-            "source_sha256": sha256(input_path),
-            "checkpoint": fp,
-        }
-
-        with IndependentPredictionWriter(
-            shape=imgs.shape,
-            recist=recist,
-            spacing=spacing,
-            gt=gts,
-            metadata=metadata,
-            scratch=scratch,
-        ) as writer:
-            # 4. Pure model inference (counted in runtime_s)
-            with profiler.phase("inference"):
-                for lab in unique_labs:
-                    recist_mask = recist == lab
-                    z_indices = np.unique(np.where(recist_mask)[0])
-                    if len(z_indices) == 0:
-                        continue
-                    z_mid = int(z_indices[0])
-                    slice_2d = recist_mask[z_mid].astype(np.uint8)
-
-                    if session.device.type == "cuda":
-                        torch.cuda.synchronize(session.device)
-                    t_lesion = time.perf_counter()
-
-                    session.reset_interactions()
-                    if prompt_mode == "box":
-                        bbox_2d = get_diameter_bbox(slice_2d, shift=0)
-                        x_min, y_min, x_max, y_max = [int(v) for v in bbox_2d]
-                        bbox_3d = [
-                            [z_mid, z_mid + 1],
-                            [y_min, y_max + 1],
-                            [x_min, x_max + 1],
-                        ]
-                        session.add_bbox_interaction(bbox_3d, include_interaction=True)
-                    elif prompt_mode == "line":
-                        plane = scribble_plane(
-                            recist_mask[z_mid],
-                            session.preferred_scribble_thickness,
-                            stroke=scribble_stroke,
-                            inset=scribble_inset,
-                        )
-                        if has_interaction_bbox:
-                            ys, xs = np.nonzero(plane)
-                            y0, y1 = int(ys.min()), int(ys.max()) + 1
-                            x0, x1 = int(xs.min()), int(xs.max()) + 1
-                            crop = np.ascontiguousarray(plane[None, y0:y1, x0:x1].astype(np.uint8))
-                            session.add_scribble_interaction(
-                                crop,
-                                include_interaction=True,
-                                interaction_bbox=[[z_mid, z_mid + 1], [y0, y1], [x0, x1]],
-                            )
-                        else:
-                            scribble_vol = np.zeros(recist.shape, dtype=np.uint8)
-                            scribble_vol[z_mid] = plane
-                            session.add_scribble_interaction(scribble_vol, include_interaction=True)
-                    elif prompt_mode in RECIST_POS_ONLY_POINT_MODES:
-                        pts_xy = points_for_mode(slice_2d, prompt_mode)
-                        if interaction == "progressive":
-                            for px, py in pts_xy:
-                                session.add_point_interaction(
-                                    (z_mid, int(py), int(px)),
-                                    include_interaction=True,
-                                )
-                        else:
-                            order = list(range(len(pts_xy)))
-                            order = order[1:] + order[:1]
-                            for i in order:
-                                px, py = pts_xy[i]
-                                session.add_point_interaction(
-                                    (z_mid, int(py), int(px)),
-                                    include_interaction=True,
-                                    run_prediction=(i == 0),
-                                )
-                    elif is_mask_mode or is_recist_neg_mode:
-                        if is_mask_mode:
-                            mask_slice = (gts[z_mid] == lab).astype(np.int32)
-                            fg_xy, bg_xy = mask_points_for_mode(mask_slice, prompt_mode)
-                        else:
-                            fg_xy, bg_xy = recist_points_for_mode(slice_2d, prompt_mode)
-                        prediction_center = None
-                        if len(fg_xy):
-                            cx, cy = np.mean(fg_xy, axis=0)
-                            prediction_center = (z_mid, int(round(cy)), int(round(cx)))
-                        for px, py in fg_xy:
-                            session.add_point_interaction(
-                                (z_mid, int(py), int(px)),
-                                include_interaction=True,
-                                run_prediction=False,
-                            )
-                        for px, py in bg_xy:
-                            session.add_point_interaction(
-                                (z_mid, int(py), int(px)),
-                                include_interaction=False,
-                                run_prediction=False,
-                            )
-                        if prediction_center is not None:
-                            session.new_interaction_centers = [prediction_center]
-                        else:
-                            session.new_interaction_centers = [session.new_interaction_centers[-1]]
-                        session.new_interaction_zoom_out_factors = [
-                            session.new_interaction_zoom_out_factors[-1]
-                        ]
-                        session._predict()
-                    else:
-                        raise ValueError(f"Unhandled prompt_mode: {prompt_mode!r}")
-
-                    mask = session.target_buffer.cpu().numpy() > 0
-                    writer.mark_attempted(lab)
-                    writer.write_volume(lab, mask)
-
-                    if session.device.type == "cuda":
-                        torch.cuda.synchronize(session.device)
-                    profiler.record_lesion_time(lab, time.perf_counter() - t_lesion)
-
-            # 5. Save compressed independent-instance NPZ (excluded from runtime_s)
-            with profiler.phase("save"):
-                receipt = writer.save(output_npz, overwrite=overwrite)
-
-        del session
-        gc.collect()
-        if torch_device.type == "cuda":
-            empty_cache(torch_device)
-
-        record = profiler.finalize(
-            extra_metadata={
+            metadata = {
                 "dataset": dataset_name or "",
                 "case_id": case_id,
                 "model": eff_model_name,
-                "family": "nninteractive",
                 "prompt_mode": prompt_mode,
                 "interaction": interaction,
+                "scribble_stroke": scribble_stroke,
+                "scribble_inset": scribble_inset,
+                "device": str(session.device),
                 "num_threads": int(torch.get_num_threads()),
-                "n_lesions": len(receipt["instance_ids"]),
-                "shape_zyx": list(imgs.shape),
-                "spacing_xyz": [float(s) for s in spacing],
                 "source_npz": str(input_path),
-                "source_sha256": metadata["source_sha256"],
-                "prediction_npz": str(Path(output_npz).resolve()),
-                "prediction_sha256": receipt["output_sha256"],
-                "checkpoint_path": fp["weights_path"],
-                "checkpoint_sha256": fp["weights_sha256"],
-                "rows": receipt["rows"],
-                "status": "ok",
+                "source_sha256": sha256(input_path),
+                "checkpoint": fp,
             }
-        )
 
-    metrics_path = Path(metrics_json)
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path.write_text(json.dumps(record, indent=2) + "\n")
+            with IndependentPredictionWriter(
+                shape=imgs.shape,
+                recist=recist,
+                spacing=spacing,
+                gt=gts,
+                metadata=metadata,
+                scratch=scratch,
+            ) as writer:
+                # 4. Pure model inference (counted in runtime_s)
+                with profiler.phase("inference"):
+                    for lab in unique_labs:
+                        recist_mask = recist == lab
+                        z_indices = np.unique(np.where(recist_mask)[0])
+                        if len(z_indices) == 0:
+                            continue
+                        z_mid = int(z_indices[0])
+                        slice_2d = recist_mask[z_mid].astype(np.uint8)
+
+                        if session.device.type == "cuda":
+                            torch.cuda.synchronize(session.device)
+                        t_lesion = time.perf_counter()
+
+                        session.reset_interactions()
+                        if prompt_mode == "box":
+                            bbox_2d = get_diameter_bbox(slice_2d, shift=0)
+                            x_min, y_min, x_max, y_max = [int(v) for v in bbox_2d]
+                            bbox_3d = [
+                                [z_mid, z_mid + 1],
+                                [y_min, y_max + 1],
+                                [x_min, x_max + 1],
+                            ]
+                            session.add_bbox_interaction(bbox_3d, include_interaction=True)
+                        elif prompt_mode == "line":
+                            plane = scribble_plane(
+                                recist_mask[z_mid],
+                                session.preferred_scribble_thickness,
+                                stroke=scribble_stroke,
+                                inset=scribble_inset,
+                            )
+                            if has_interaction_bbox:
+                                ys, xs = np.nonzero(plane)
+                                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                                crop = np.ascontiguousarray(plane[None, y0:y1, x0:x1].astype(np.uint8))
+                                session.add_scribble_interaction(
+                                    crop,
+                                    include_interaction=True,
+                                    interaction_bbox=[[z_mid, z_mid + 1], [y0, y1], [x0, x1]],
+                                )
+                            else:
+                                scribble_vol = np.zeros(recist.shape, dtype=np.uint8)
+                                scribble_vol[z_mid] = plane
+                                session.add_scribble_interaction(scribble_vol, include_interaction=True)
+                        elif prompt_mode in RECIST_POS_ONLY_POINT_MODES:
+                            pts_xy = points_for_mode(slice_2d, prompt_mode)
+                            if interaction == "progressive":
+                                for px, py in pts_xy:
+                                    session.add_point_interaction(
+                                        (z_mid, int(py), int(px)),
+                                        include_interaction=True,
+                                    )
+                            else:
+                                order = list(range(len(pts_xy)))
+                                order = order[1:] + order[:1]
+                                for i in order:
+                                    px, py = pts_xy[i]
+                                    session.add_point_interaction(
+                                        (z_mid, int(py), int(px)),
+                                        include_interaction=True,
+                                        run_prediction=(i == 0),
+                                    )
+                        elif is_mask_mode or is_recist_neg_mode:
+                            if is_mask_mode:
+                                mask_slice = (gts[z_mid] == lab).astype(np.int32)
+                                fg_xy, bg_xy = mask_points_for_mode(mask_slice, prompt_mode)
+                            else:
+                                fg_xy, bg_xy = recist_points_for_mode(slice_2d, prompt_mode)
+                            prediction_center = None
+                            if len(fg_xy):
+                                cx, cy = np.mean(fg_xy, axis=0)
+                                prediction_center = (z_mid, int(round(cy)), int(round(cx)))
+                            for px, py in fg_xy:
+                                session.add_point_interaction(
+                                    (z_mid, int(py), int(px)),
+                                    include_interaction=True,
+                                    run_prediction=False,
+                                )
+                            for px, py in bg_xy:
+                                session.add_point_interaction(
+                                    (z_mid, int(py), int(px)),
+                                    include_interaction=False,
+                                    run_prediction=False,
+                                )
+                            if prediction_center is not None:
+                                session.new_interaction_centers = [prediction_center]
+                            else:
+                                session.new_interaction_centers = [session.new_interaction_centers[-1]]
+                            session.new_interaction_zoom_out_factors = [
+                                session.new_interaction_zoom_out_factors[-1]
+                            ]
+                            session._predict()
+                        else:
+                            raise ValueError(f"Unhandled prompt_mode: {prompt_mode!r}")
+
+                        mask = session.target_buffer.cpu().numpy() > 0
+                        writer.mark_attempted(lab)
+                        writer.write_volume(lab, mask)
+
+                        if session.device.type == "cuda":
+                            torch.cuda.synchronize(session.device)
+                        profiler.record_lesion_time(lab, time.perf_counter() - t_lesion)
+
+                # 5. Optional postprocess (counted in runtime_s) + compressed NPZ save
+                receipt, post_npz, post_rows = finalize_and_save_predictions(
+                    writer,
+                    output_npz,
+                    profiler=profiler,
+                    postprocess=postprocess,
+                    overwrite=overwrite,
+                    scratch=scratch,
+                )
+
+            del session
+            session = None
+            gc.collect()
+            if torch_device.type == "cuda":
+                empty_cache(torch_device)
+
+            record = profiler.finalize(
+                extra_metadata={
+                    "dataset": dataset_name or "",
+                    "case_id": case_id,
+                    "model": eff_model_name,
+                    "family": "nninteractive",
+                    "prompt_mode": prompt_mode,
+                    "interaction": interaction,
+                    "postprocess": postprocess,
+                    "num_threads": int(torch.get_num_threads()),
+                    "n_lesions": len(receipt["instance_ids"]),
+                    "shape_zyx": list(imgs.shape),
+                    "spacing_xyz": [float(s) for s in spacing],
+                    "source_npz": str(input_path),
+                    "source_sha256": metadata["source_sha256"],
+                    "prediction_npz": str(Path(output_npz).resolve()),
+                    "prediction_sha256": receipt["output_sha256"],
+                    "postprocessed_prediction_npz": str(post_npz.resolve()) if post_npz else None,
+                    "checkpoint_path": fp["weights_path"],
+                    "checkpoint_sha256": fp["weights_sha256"],
+                    "rows": receipt["rows"],
+                    "postprocessed_rows": post_rows,
+                    "status": "ok",
+                }
+            )
+        except BaseException as exc:
+            if session is not None:
+                del session
+            gc.collect()
+            fail_record = profiler.finalize(
+                extra_metadata={
+                    "dataset": dataset_name or "",
+                    "case_id": case_id,
+                    "model": eff_model_name,
+                    "family": "nninteractive",
+                    "prompt_mode": prompt_mode,
+                    "interaction": interaction,
+                    "postprocess": postprocess,
+                    "num_threads": int(torch.get_num_threads()),
+                    "source_npz": str(input_path),
+                    "status": "failed(exception)",
+                    "error": repr(exc),
+                    "rows": [],
+                }
+            )
+            write_json_atomic(metrics_path, fail_record)
+            if plots_dir is not None:
+                plot_case(fail_record, Path(plots_dir))
+            raise
+
+    write_json_atomic(metrics_path, record)
     if plots_dir is not None:
         plot_case(record, Path(plots_dir))
     return record
@@ -426,8 +456,20 @@ def run_case(
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-i", "--input", required=True, type=Path, help="Input NPZ file or directory")
-    ap.add_argument("-o", "--output-dir", required=True, type=Path, help="Output directory")
+    ap.add_argument(
+        "-i",
+        "--input",
+        type=Path,
+        default=Path("data/inputs"),
+        help="Input NPZ file or directory (default: data/inputs)",
+    )
+    ap.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=Path("runs/nninteractive"),
+        help="Output directory (default: runs/nninteractive)",
+    )
     ap.add_argument("--checkpoint", default=None, help="nnInteractive_v1.0 folder")
     ap.add_argument(
         "--expect-model",
@@ -436,8 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--require-raw-hu", action="store_true")
     ap.add_argument("--device", default="cpu", help="cpu | cuda | cuda:N")
+    ap.add_argument("--gpu-index", type=int, default=None, help="Physical GPU index for NVML monitoring")
     ap.add_argument("--num-threads", type=int, default=1)
-    ap.add_argument("--prompt_mode", "--prompt-mode", dest="prompt_mode", required=True, choices=PROMPT_MODES)
+    ap.add_argument("--prompt_mode", "--prompt-mode", dest="prompt_mode", default="box", choices=PROMPT_MODES)
     ap.add_argument("--interaction", choices=("batch", "progressive"), default="batch")
     ap.add_argument("--scribble-stroke", choices=SCRIBBLE_STROKES, default="board")
     ap.add_argument("--scribble-inset", type=float, default=0.0)
@@ -445,6 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--gpu-tolerance-mb", type=float, default=DEFAULT_GPU_TOLERANCE_MB)
     ap.add_argument("--model-name", type=str, default=None)
     ap.add_argument("--dataset", type=str, default=None)
+    ap.add_argument("--postprocess", choices=("none", "moving_centroid"), default="none")
     ap.add_argument("--plots", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
     return ap
@@ -478,6 +522,7 @@ def main() -> int:
             checkpoint=args.checkpoint,
             expect_model=args.expect_model,
             device=args.device,
+            gpu_index=args.gpu_index,
             interaction=args.interaction,
             scribble_stroke=args.scribble_stroke,
             scribble_inset=args.scribble_inset,
@@ -488,13 +533,15 @@ def main() -> int:
             plots_dir=plots_dir,
             model_name=args.model_name,
             dataset_name=args.dataset,
+            postprocess=args.postprocess,
             overwrite=args.overwrite,
         )
         m = rec["metrics"]
+        gpu_str = f"{m['MaxGPU_Mem_MB']:.1f} MiB" if m["MaxGPU_Mem_MB"] is not None else "N/A"
         print(
             f"[done] {npz_path.name} | runtime={m['runtime_s']:.3f}s "
-            f"(load={m['model_load_s']:.3f}s, infer={m['inference_s']:.3f}s) | "
-            f"RAM={m['MaxRAM_MB']:.1f} MiB | GPU={m['MaxGPU_Mem_MB']:.1f} MiB | "
+            f"(load={m['model_load_s']:.3f}s, infer={m['inference_s']:.3f}s, post={m['postprocess_s']:.3f}s) | "
+            f"RAM={m['MaxRAM_MB']:.1f} MiB | GPU={gpu_str} ({m['gpu_monitor_status']}) | "
             f"sanity={m['gpu_sanity_ok']}"
         )
     return 0

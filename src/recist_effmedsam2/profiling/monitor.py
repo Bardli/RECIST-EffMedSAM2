@@ -2,15 +2,20 @@
 
 Design follows ``medfm-flare/FLARE-Efficiency`` (background monotonic sampling,
 trapezoidal AUC integration, and GPU ranking tolerance) while isolating RAM and
-GPU measurements to the active inference process tree so shared hosts do not
-contaminate CPU sanity checks or memory baselines.
+GPU measurements to the active inference process tree, tracking physical GPU
+indices across ``CUDA_VISIBLE_DEVICES`` remappings, distinguishing unmeasured
+GPU queries (``None``) from verified ``0.0 MiB``, and providing an external
+:class:`ProcessTreeMonitor` so crashed/OOM-killed workers still leave resource
+telemetry.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import json
 import logging
 import os
+from pathlib import Path
 import platform
 import resource
 import shutil
@@ -30,16 +35,24 @@ DEFAULT_GPU_TOLERANCE_MB = 4096.0
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 
+def write_json_atomic(path: str | Path, payload: dict[str, Any]) -> None:
+    """Write JSON atomically using a temporary sibling file and ``os.replace``."""
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(tmp, dest)
+
+
 def get_process_max_rss_mb() -> float:
     """Return kernel high-water-mark RSS for the current process in MiB.
 
     ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` reports KiB on Linux and bytes
-    on macOS/Darwin. Returns max across self and waited children when available.
+    on macOS/Darwin.
     """
     divisor = _MIB if sys.platform == "darwin" else 1024.0
     self_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor
-    child_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / divisor
-    return float(max(self_rss, child_rss))
+    return float(self_rss)
 
 
 def ranking_gpu_memory(
@@ -58,64 +71,144 @@ def _auc(seconds: list[float], values: list[float]) -> float:
     return float(_trapezoid(values[:n], seconds[:n]))
 
 
-def _process_tree_pids(root_proc: psutil.Process) -> set[int]:
-    pids = {root_proc.pid}
-    try:
-        for child in root_proc.children(recursive=True):
-            pids.add(child.pid)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
-    return pids
+def resolve_physical_gpu_targets(
+    device: str,
+    physical_gpu_index: int | None = None,
+    cuda_visible_devices: str | None = None,
+) -> list[int | str] | None:
+    """Resolve which physical GPU(s) NVML/nvidia-smi should inspect.
+
+    Returns:
+      - ``None`` in CPU mode (inspect all physical GPUs so any stray CUDA
+        allocation on any GPU is caught).
+      - ``[physical_gpu_index]`` when explicitly provided.
+      - Mapped physical GPU index or UUID from ``CUDA_VISIBLE_DEVICES`` and the
+        logical device string (e.g. ``cuda:0`` under ``CUDA_VISIBLE_DEVICES=2``
+        resolves to ``[2]``).
+      - ``[]`` when ``CUDA_VISIBLE_DEVICES`` hides or invalidates the logical GPU.
+    """
+    if device == "cpu":
+        return None
+    if physical_gpu_index is not None:
+        return [int(physical_gpu_index)]
+
+    if device == "cuda":
+        logical_idx = 0
+    elif device.startswith("cuda:"):
+        logical_idx = int(device.split(":", 1)[1])
+    else:
+        logical_idx = 0
+
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES") if cuda_visible_devices is None else cuda_visible_devices
+    if cvd is None:
+        return [logical_idx]
+
+    tokens = [tok.strip() for tok in cvd.split(",") if tok.strip()]
+    if not tokens or logical_idx < 0 or logical_idx >= len(tokens):
+        return []
+    tok = tokens[logical_idx]
+    if tok.isdigit():
+        return [int(tok)]
+    if tok == "-1" or tok.lower() == "void":
+        return []
+    return [tok]
 
 
 class PidGpuSampler:
     """Sample GPU memory (MiB) allocated specifically by the target process tree.
 
-    Uses ``pynvml`` (provided by ``nvidia-ml-py``) and falls back to
-    ``nvidia-smi --query-compute-apps`` if NVML Python bindings are unavailable.
-    Querying by process PID avoids false non-zero readings on shared GPUs.
+    Distinguishes verified ``0.0 MiB`` from unmeasured/failed queries (``None``).
     """
 
-    def __init__(self, gpu_index: int | None = None) -> None:
-        self.gpu_index = gpu_index
+    def __init__(
+        self,
+        gpu_targets: list[int | str] | None = None,
+        *,
+        gpu_index: int | None = None,
+    ) -> None:
+        if gpu_targets is None and gpu_index is not None:
+            gpu_targets = [int(gpu_index)]
+        self.gpu_targets = gpu_targets
         self.backend = "none"
         self.gpu_name: str | None = None
+        self.monitored_physical_gpus: list[int | str] = []
+        self.queries_attempted = 0
+        self.queries_succeeded = 0
+        self.queries_failed = 0
+        self.last_error: str | None = None
+
         self._pynvml = None
         self._handles: list[Any] = []
         self._nvidia_smi = shutil.which("nvidia-smi")
+        self._target_resolution_failed = False
+
+        if gpu_targets == []:
+            self.last_error = "No visible physical GPU mapped for CUDA device"
+            self._target_resolution_failed = True
 
         try:
             import pynvml
 
             pynvml.nvmlInit()
             count = pynvml.nvmlDeviceGetCount()
-            if count > 0:
-                indices = [gpu_index] if (gpu_index is not None and 0 <= gpu_index < count) else list(range(count))
-                for idx in indices:
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
-                    self._handles.append(handle)
-                if self._handles:
-                    raw_name = pynvml.nvmlDeviceGetName(self._handles[0])
+            if count > 0 and not self._target_resolution_failed:
+                targets: list[int | str] = list(range(count)) if gpu_targets is None else list(gpu_targets)
+                handles: list[Any] = []
+                resolved: list[int | str] = []
+                for target in targets:
+                    if isinstance(target, int):
+                        if not 0 <= target < count:
+                            raise ValueError(f"Physical GPU index {target} out of range (count={count})")
+                        handles.append(pynvml.nvmlDeviceGetHandleByIndex(target))
+                        resolved.append(target)
+                    else:
+                        handles.append(pynvml.nvmlDeviceGetHandleByUUID(str(target)))
+                        resolved.append(str(target))
+                if handles:
+                    raw_name = pynvml.nvmlDeviceGetName(handles[0])
                     self.gpu_name = raw_name.decode() if isinstance(raw_name, bytes) else str(raw_name)
+                self._handles = handles
+                self.monitored_physical_gpus = resolved
                 self._pynvml = pynvml
                 self.backend = "pynvml"
             else:
                 pynvml.nvmlShutdown()
+                if self._target_resolution_failed:
+                    self.backend = "pynvml"
         except Exception as exc:
-            logger.debug("pynvml unavailable (%s); falling back to nvidia-smi/none", exc)
+            logger.debug("pynvml init failed (%s); falling back to nvidia-smi/none", exc)
+            self.last_error = repr(exc)
             self._pynvml = None
             self._handles = []
             if self._nvidia_smi:
                 self.backend = "nvidia-smi"
+                if gpu_targets:
+                    self.monitored_physical_gpus = list(gpu_targets)
+            elif self._target_resolution_failed:
+                self.backend = "none"
 
-    def read_mb(self, pids: set[int]) -> float:
-        """Return total GPU memory in MiB used by any PID in ``pids``."""
+    def read_mb(self, pids: set[int]) -> float | None:
+        """Return total GPU memory (MiB) for ``pids``, or ``None`` if unmeasured/failed."""
         if not pids:
-            return 0.0
-        if self.backend == "pynvml" and self._pynvml is not None:
+            return None
+        self.queries_attempted += 1
+
+        if self._target_resolution_failed:
+            self.queries_failed += 1
+            return None
+
+        if self.backend == "none":
+            return None
+
+        if self.backend == "pynvml":
+            if self._pynvml is None or not self._handles:
+                self.queries_failed += 1
+                return None
             total_bytes = 0
             seen_per_gpu_pid: set[tuple[int, int]] = set()
+            all_handles_ok = True
             for gpu_idx, handle in enumerate(self._handles):
+                handle_ok = False
                 for fn_name in (
                     "nvmlDeviceGetComputeRunningProcesses",
                     "nvmlDeviceGetGraphicsRunningProcesses",
@@ -125,7 +218,9 @@ class PidGpuSampler:
                         continue
                     try:
                         procs = fn(handle)
-                    except Exception:
+                        handle_ok = True
+                    except Exception as exc:
+                        self.last_error = repr(exc)
                         continue
                     for proc in procs:
                         pid = int(getattr(proc, "pid", -1))
@@ -133,23 +228,34 @@ class PidGpuSampler:
                             seen_per_gpu_pid.add((gpu_idx, pid))
                             used = getattr(proc, "usedGpuMemory", 0) or 0
                             total_bytes += int(used)
+                if not handle_ok:
+                    all_handles_ok = False
+            if not all_handles_ok:
+                self.queries_failed += 1
+                return None
+            self.queries_succeeded += 1
             return float(total_bytes / _MIB)
 
         if self.backend == "nvidia-smi" and self._nvidia_smi:
+            cmd = [
+                self._nvidia_smi,
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ]
+            if self.gpu_targets:
+                cmd += ["-i", ",".join(str(t) for t in self.gpu_targets)]
             try:
                 res = subprocess.run(
-                    [
-                        self._nvidia_smi,
-                        "--query-compute-apps=pid,used_gpu_memory",
-                        "--format=csv,noheader,nounits",
-                    ],
+                    cmd,
                     capture_output=True,
                     text=True,
                     timeout=2.0,
                     check=False,
                 )
                 if res.returncode != 0:
-                    return 0.0
+                    self.queries_failed += 1
+                    self.last_error = res.stderr.strip() or f"nvidia-smi rc={res.returncode}"
+                    return None
                 total_mb = 0.0
                 for line in res.stdout.splitlines():
                     parts = [p.strip() for p in line.split(",")]
@@ -162,11 +268,26 @@ class PidGpuSampler:
                         continue
                     if pid in pids:
                         total_mb += mem
+                self.queries_succeeded += 1
                 return float(total_mb)
-            except Exception:
-                return 0.0
+            except Exception as exc:
+                self.queries_failed += 1
+                self.last_error = repr(exc)
+                return None
 
-        return 0.0
+        return None
+
+    @property
+    def status(self) -> str:
+        if self.backend == "none":
+            return "unavailable"
+        if self.queries_succeeded > 0 and self.queries_failed == 0:
+            return "measured"
+        if self.queries_succeeded > 0 and self.queries_failed > 0:
+            return "partial"
+        if self.queries_failed > 0:
+            return "query_failed"
+        return "unavailable"
 
     def close(self) -> None:
         if self._pynvml is not None:
@@ -212,13 +333,13 @@ def collect_torch_cuda_stats(device: str = "cpu") -> dict[str, Any]:
 
 @dataclass
 class Samples:
-    """Time series collected by :class:`CaseProfiler`."""
+    """Time series collected by :class:`CaseProfiler` or :class:`ProcessTreeMonitor`."""
 
     interval: float
     seconds: list[float] = field(default_factory=list)
     cpu_percent: list[float] = field(default_factory=list)
     ram_mb: list[float] = field(default_factory=list)
-    gpu_mb: list[float] = field(default_factory=list)
+    gpu_mb: list[float | None] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.seconds)
@@ -234,11 +355,15 @@ def summarize_samples(
     inference_spans: list[tuple[float, float]] | None = None,
     torch_cuda_stats: dict[str, Any] | None = None,
     gpu_tolerance_mb: float = DEFAULT_GPU_TOLERANCE_MB,
+    gpu_monitor_status: str | None = None,
+    gpu_monitor_backend: str = "unknown",
+    gpu_queries_failed: int = 0,
 ) -> dict[str, Any]:
     """Compute scalar efficiency metrics from raw samples and timing phases."""
     model_load_s = float(timings.get("model_load_s", 0.0))
     inference_s = float(timings.get("inference_s", 0.0))
-    runtime_s = model_load_s + inference_s
+    postprocess_s = float(timings.get("postprocess_s", 0.0))
+    runtime_s = model_load_s + inference_s + postprocess_s
 
     sampled_ram_peak = max(samples.ram_mb) if samples.ram_mb else 0.0
     max_ram_mb = max(sampled_ram_peak, float(ru_maxrss_mb), float(ram_baseline_mb))
@@ -259,30 +384,61 @@ def summarize_samples(
     torch_alloc_mb = float(cuda_stats.get("peak_allocated_mb", 0.0))
     torch_reserved_mb = float(cuda_stats.get("peak_reserved_mb", 0.0))
     cuda_available = bool(cuda_stats.get("cuda_available", False))
+    cuda_initialized = bool(cuda_stats.get("cuda_initialized", False))
 
-    nvml_peak_mb = max(samples.gpu_mb) if samples.gpu_mb else 0.0
-    max_gpu_mb = max(nvml_peak_mb, torch_reserved_mb)
-    auc_gpu = _auc(samples.seconds, samples.gpu_mb)
-    rank_gpu_mb = ranking_gpu_memory(max_gpu_mb, gpu_tolerance_mb)
+    valid_gpu = [(t, float(g)) for t, g in zip(samples.seconds, samples.gpu_mb) if g is not None]
+    gpu_valid_samples = len(valid_gpu)
+    gpu_failed_samples = int(gpu_queries_failed)
+
+    if gpu_monitor_status is None:
+        if gpu_valid_samples > 0 and gpu_failed_samples == 0:
+            gpu_monitor_status = "measured"
+        elif gpu_valid_samples > 0:
+            gpu_monitor_status = "partial"
+        elif gpu_failed_samples > 0:
+            gpu_monitor_status = "query_failed"
+        else:
+            gpu_monitor_status = "unavailable"
+
+    if valid_gpu:
+        nvml_peak_mb: float | None = round(max(g for _, g in valid_gpu), 3)
+        auc_gpu: float | None = round(_auc([t for t, _ in valid_gpu], [g for _, g in valid_gpu]), 3)
+    else:
+        nvml_peak_mb = None
+        auc_gpu = None
 
     is_cpu = device == "cpu"
-    if is_cpu:
-        gpu_sanity_ok = (
-            max_gpu_mb == 0.0
-            and torch_alloc_mb == 0.0
-            and torch_reserved_mb == 0.0
-            and not cuda_available
-        )
+    if nvml_peak_mb is not None:
+        max_gpu_mb: float | None = round(max(nvml_peak_mb, torch_reserved_mb), 3)
+    elif torch_reserved_mb > 0.0 or (not is_cpu and cuda_initialized):
+        max_gpu_mb = round(torch_reserved_mb, 3)
     else:
-        gpu_sanity_ok = cuda_available
+        max_gpu_mb = None
+
+    rank_gpu_mb: float | None = (
+        ranking_gpu_memory(max_gpu_mb, gpu_tolerance_mb) if max_gpu_mb is not None else None
+    )
+
+    if is_cpu:
+        if cuda_available or torch_alloc_mb > 0.0 or torch_reserved_mb > 0.0:
+            gpu_sanity_ok: bool | None = False
+        elif gpu_monitor_status == "measured":
+            gpu_sanity_ok = bool(nvml_peak_mb == 0.0)
+        elif gpu_monitor_status in ("partial", "query_failed"):
+            gpu_sanity_ok = False
+        else:
+            # No NVML/nvidia-smi on host: CUDA stayed disabled, but hardware VRAM was unverified
+            gpu_sanity_ok = None
+    else:
+        gpu_sanity_ok = bool(cuda_available and gpu_monitor_status in ("measured", "partial"))
 
     return {
         "runtime_s": round(runtime_s, 6),
         "model_load_s": round(model_load_s, 6),
         "inference_s": round(inference_s, 6),
+        "postprocess_s": round(postprocess_s, 6),
         "data_load_s": round(float(timings.get("data_load_s", 0.0)), 6),
         "preprocess_s": round(float(timings.get("preprocess_s", 0.0)), 6),
-        "postprocess_s": round(float(timings.get("postprocess_s", 0.0)), 6),
         "save_s": round(float(timings.get("save_s", 0.0)), 6),
         "wall_total_s": round(float(timings.get("wall_total_s", 0.0)), 6),
         "MaxRAM_MB": round(max_ram_mb, 3),
@@ -292,21 +448,27 @@ def summarize_samples(
         "AUC_RAM_Time_MB_s": round(auc_ram, 3),
         "MaxCPU_Utilization_pct": round(max_cpu_pct, 3),
         "AUC_CPU_Time_pct_s": round(auc_cpu, 3),
-        "MaxGPU_Mem_MB": round(max_gpu_mb, 3),
-        "gpu_nvml_peak_mb": round(nvml_peak_mb, 3),
-        "AUC_GPU_Time_MB_s": round(auc_gpu, 3),
+        "MaxGPU_Mem_MB": max_gpu_mb,
+        "gpu_nvml_peak_mb": nvml_peak_mb,
+        "AUC_GPU_Time_MB_s": auc_gpu,
         "RankGPU_Mem_MB": rank_gpu_mb,
         "gpu_torch_peak_allocated_mb": round(torch_alloc_mb, 3),
         "gpu_torch_peak_reserved_mb": round(torch_reserved_mb, 3),
-        "gpu_sanity_ok": bool(gpu_sanity_ok),
+        "gpu_monitor_status": gpu_monitor_status,
+        "gpu_monitor_backend": gpu_monitor_backend,
+        "gpu_valid_samples": gpu_valid_samples,
+        "gpu_failed_samples": gpu_failed_samples,
+        "gpu_sanity_ok": gpu_sanity_ok,
     }
 
 
-class CaseProfiler:
-    """Context manager measuring phase timings, RAM, CPU, and PID-scoped GPU memory."""
+class _BaseTreeMonitor:
+    """Shared background sampler for a process tree (in-process or external PID)."""
 
     def __init__(
         self,
+        *,
+        target_pid: int,
         device: str = "cpu",
         gpu_index: int | None = None,
         sample_interval: float = 0.1,
@@ -316,8 +478,10 @@ class CaseProfiler:
             raise ValueError("sample_interval must be > 0")
         if gpu_tolerance_mb < 0:
             raise ValueError("gpu_tolerance_mb must be >= 0")
+        self.target_pid = int(target_pid)
         self.device = device
         self.gpu_index = gpu_index
+        self.physical_gpu_targets = resolve_physical_gpu_targets(device, gpu_index)
         self.sample_interval = float(sample_interval)
         self.gpu_tolerance_mb = float(gpu_tolerance_mb)
 
@@ -326,10 +490,15 @@ class CaseProfiler:
         self.phase_spans: dict[str, list[tuple[float, float]]] = {}
         self.per_lesion_inference_s: dict[str, float] = {}
 
-        self._root_proc = psutil.Process(os.getpid())
-        self._tracked_procs: dict[int, psutil.Process] = {self._root_proc.pid: self._root_proc}
+        try:
+            self._root_proc: psutil.Process | None = psutil.Process(self.target_pid)
+        except psutil.NoSuchProcess:
+            self._root_proc = None
+        self._tracked_procs: dict[int, psutil.Process] = (
+            {self._root_proc.pid: self._root_proc} if self._root_proc is not None else {}
+        )
         self._logical_cpus = max(1, psutil.cpu_count(logical=True) or 1)
-        self._gpu_sampler = PidGpuSampler(gpu_index=gpu_index)
+        self._gpu_sampler = PidGpuSampler(gpu_targets=self.physical_gpu_targets)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._stopped = False
@@ -339,15 +508,15 @@ class CaseProfiler:
         self.ram_baseline_mb: float = 0.0
         self._finalized_record: dict[str, Any] | None = None
 
-    def start(self) -> "CaseProfiler":
+    def start(self) -> "_BaseTreeMonitor":
         if self._thread is not None:
-            raise RuntimeError("CaseProfiler already started")
+            raise RuntimeError("Monitor already started")
         self._start_mono = time.monotonic()
         self._start_perf = time.perf_counter()
         self.ram_baseline_mb = self._read_tree_rss_mb()
         self._prime_cpu_counters()
         self._sample_once()
-        self._thread = threading.Thread(target=self._loop, name="case-profiler", daemon=True)
+        self._thread = threading.Thread(target=self._loop, name="resource-monitor", daemon=True)
         self._thread.start()
         return self
 
@@ -364,33 +533,15 @@ class CaseProfiler:
         self._sample_once()
         return self.samples
 
-    def _sync_cuda_if_needed(self) -> None:
-        if not self.device.startswith("cuda"):
-            return
-        torch_mod = sys.modules.get("torch")
-        if torch_mod is not None and torch_mod.cuda.is_available() and torch_mod.cuda.is_initialized():
-            torch_mod.cuda.synchronize(torch_mod.device(self.device))
-
-    @contextmanager
-    def phase(self, name: str):
-        """Time a named execution phase (synchronizing CUDA on GPU runs)."""
-        self._sync_cuda_if_needed()
-        t0_rel = time.monotonic() - self._start_mono
-        t0_perf = time.perf_counter()
-        try:
-            yield
-        finally:
-            self._sync_cuda_if_needed()
-            dt = time.perf_counter() - t0_perf
-            t1_rel = time.monotonic() - self._start_mono
-            self.timings[f"{name}_s"] = self.timings.get(f"{name}_s", 0.0) + dt
-            self.phase_spans.setdefault(name, []).append((t0_rel, t1_rel))
-            self._sample_once()
-
-    def record_lesion_time(self, label_id: int, elapsed_s: float) -> None:
-        self.per_lesion_inference_s[str(int(label_id))] = round(float(elapsed_s), 6)
-
     def _refresh_tree(self) -> list[psutil.Process]:
+        if self._root_proc is None or not self._root_proc.is_running():
+            return []
+        try:
+            if self._root_proc.status() == psutil.STATUS_ZOMBIE:
+                return []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return []
+
         procs: list[psutil.Process] = [self._root_proc]
         try:
             children = self._root_proc.children(recursive=True)
@@ -433,15 +584,21 @@ class CaseProfiler:
         with self._lock:
             try:
                 procs = self._refresh_tree()
+                if not procs:
+                    return
                 pids = {p.pid for p in procs}
                 total_rss_bytes = 0
                 total_cpu_pct = 0.0
+                alive = False
                 for proc in procs:
                     try:
                         total_rss_bytes += proc.memory_info().rss
                         total_cpu_pct += proc.cpu_percent(None)
+                        alive = True
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
+                if not alive:
+                    return
                 ram_mb = float(total_rss_bytes / _MIB)
                 cpu_pct = min(100.0, float(total_cpu_pct / self._logical_cpus))
                 gpu_mb = self._gpu_sampler.read_mb(pids)
@@ -453,7 +610,7 @@ class CaseProfiler:
             self.samples.seconds.append(round(elapsed, 6))
             self.samples.cpu_percent.append(round(cpu_pct, 3))
             self.samples.ram_mb.append(round(ram_mb, 3))
-            self.samples.gpu_mb.append(round(gpu_mb, 3))
+            self.samples.gpu_mb.append(round(gpu_mb, 3) if gpu_mb is not None else None)
 
     def _loop(self) -> None:
         tick = 0
@@ -464,11 +621,13 @@ class CaseProfiler:
                 break
             self._sample_once()
 
-    def finalize(self, extra_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Stop monitoring, compute summary metrics, close NVML, and return full record."""
-        self.stop()
-        torch_stats = collect_torch_cuda_stats(self.device)
-        ru_maxrss_mb = get_process_max_rss_mb()
+    def _build_record(
+        self,
+        *,
+        ru_maxrss_mb: float,
+        torch_stats: dict[str, Any] | None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         metrics = summarize_samples(
             self.samples,
             self.timings,
@@ -478,6 +637,9 @@ class CaseProfiler:
             inference_spans=self.phase_spans.get("inference"),
             torch_cuda_stats=torch_stats,
             gpu_tolerance_mb=self.gpu_tolerance_mb,
+            gpu_monitor_status=self._gpu_sampler.status,
+            gpu_monitor_backend=self._gpu_sampler.backend,
+            gpu_queries_failed=self._gpu_sampler.queries_failed,
         )
         host = {
             "platform": platform.platform(),
@@ -486,15 +648,21 @@ class CaseProfiler:
             "cpu_count_physical": psutil.cpu_count(logical=False),
             "total_ram_mb": round(psutil.virtual_memory().total / _MIB, 1),
             "gpu_monitor_backend": self._gpu_sampler.backend,
+            "gpu_monitor_status": self._gpu_sampler.status,
+            "gpu_monitored_physical_gpus": list(self._gpu_sampler.monitored_physical_gpus),
             "gpu_name": self._gpu_sampler.gpu_name,
         }
         self._gpu_sampler.close()
         record: dict[str, Any] = {
             "device": self.device,
-            "gpu_index": self.gpu_index,
+            "physical_gpu_index": (
+                self.physical_gpu_targets[0]
+                if self.physical_gpu_targets and len(self.physical_gpu_targets) == 1
+                else self.gpu_index
+            ),
             "gpu_memory_tolerance_mb": self.gpu_tolerance_mb,
             "host": host,
-            "torch_cuda": torch_stats,
+            "torch_cuda": torch_stats or {},
             "ru_maxrss_mb": round(ru_maxrss_mb, 3),
             "timings": {k: round(v, 6) for k, v in self.timings.items()},
             "phase_spans": {
@@ -516,9 +684,101 @@ class CaseProfiler:
         self._finalized_record = record
         return record
 
-    def __enter__(self) -> "CaseProfiler":
+    def __enter__(self) -> "_BaseTreeMonitor":
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:
         self.stop()
         self._gpu_sampler.close()
+
+
+class CaseProfiler(_BaseTreeMonitor):
+    """In-worker profiler with phase timing and CUDA synchronization."""
+
+    def __init__(
+        self,
+        device: str = "cpu",
+        gpu_index: int | None = None,
+        sample_interval: float = 0.1,
+        gpu_tolerance_mb: float = DEFAULT_GPU_TOLERANCE_MB,
+    ) -> None:
+        super().__init__(
+            target_pid=os.getpid(),
+            device=device,
+            gpu_index=gpu_index,
+            sample_interval=sample_interval,
+            gpu_tolerance_mb=gpu_tolerance_mb,
+        )
+
+    def _sync_cuda_if_needed(self) -> None:
+        if not self.device.startswith("cuda"):
+            return
+        torch_mod = sys.modules.get("torch")
+        if torch_mod is not None and torch_mod.cuda.is_available() and torch_mod.cuda.is_initialized():
+            torch_mod.cuda.synchronize(torch_mod.device(self.device))
+
+    @contextmanager
+    def phase(self, name: str):
+        """Time a named execution phase (synchronizing CUDA on GPU runs)."""
+        self._sync_cuda_if_needed()
+        t0_rel = time.monotonic() - self._start_mono
+        t0_perf = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync_cuda_if_needed()
+            dt = time.perf_counter() - t0_perf
+            t1_rel = time.monotonic() - self._start_mono
+            self.timings[f"{name}_s"] = self.timings.get(f"{name}_s", 0.0) + dt
+            self.phase_spans.setdefault(name, []).append((t0_rel, t1_rel))
+            self._sample_once()
+
+    def record_lesion_time(self, label_id: int, elapsed_s: float) -> None:
+        self.per_lesion_inference_s[str(int(label_id))] = round(float(elapsed_s), 6)
+
+    def finalize(self, extra_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Stop monitoring, compute summary metrics, close NVML, and return full record."""
+        self.stop()
+        torch_stats = collect_torch_cuda_stats(self.device)
+        ru_maxrss_mb = get_process_max_rss_mb()
+        meta = dict(extra_metadata or {})
+        meta.setdefault("monitor_source", "worker")
+        return self._build_record(
+            ru_maxrss_mb=ru_maxrss_mb,
+            torch_stats=torch_stats,
+            extra_metadata=meta,
+        )
+
+
+class ProcessTreeMonitor(_BaseTreeMonitor):
+    """External parent-process monitor attached to a subprocess PID.
+
+    Guarantees resource telemetry (RAM, CPU, GPU VRAM, wall time) is preserved
+    even when a worker is killed by SIGKILL / OOM before writing its own JSON.
+    """
+
+    def __init__(
+        self,
+        target_pid: int,
+        device: str = "cpu",
+        physical_gpu_index: int | None = None,
+        sample_interval: float = 0.1,
+        gpu_tolerance_mb: float = DEFAULT_GPU_TOLERANCE_MB,
+    ) -> None:
+        super().__init__(
+            target_pid=target_pid,
+            device=device,
+            gpu_index=physical_gpu_index,
+            sample_interval=sample_interval,
+            gpu_tolerance_mb=gpu_tolerance_mb,
+        )
+
+    def finalize(self, extra_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.stop()
+        meta = dict(extra_metadata or {})
+        meta.setdefault("monitor_source", "parent_process_monitor")
+        return self._build_record(
+            ru_maxrss_mb=0.0,
+            torch_stats=None,
+            extra_metadata=meta,
+        )

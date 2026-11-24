@@ -21,22 +21,28 @@ import numpy as np
 from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, ranking_gpu_memory
 from ..storage import load_independent_prediction
 
+DEFAULT_RUN_DIR = Path("runs/benchmark")
+
 CASE_COLUMNS = [
     "dataset",
     "case_id",
     "model",
     "device",
+    "physical_gpu_index",
     "num_threads",
+    "postprocess",
     "status",
+    "monitor_source",
+    "error",
     "n_lesions",
     "shape_zyx",
     "spacing_xyz",
     "runtime_s",
     "model_load_s",
     "inference_s",
+    "postprocess_s",
     "data_load_s",
     "preprocess_s",
-    "postprocess_s",
     "save_s",
     "wall_total_s",
     "MaxRAM_MB",
@@ -52,6 +58,10 @@ CASE_COLUMNS = [
     "RankGPU_Mem_MB",
     "gpu_torch_peak_allocated_mb",
     "gpu_torch_peak_reserved_mb",
+    "gpu_monitor_status",
+    "gpu_monitor_backend",
+    "gpu_valid_samples",
+    "gpu_failed_samples",
     "gpu_sanity_ok",
     "mean_dice",
     "mean_post_dice",
@@ -64,6 +74,7 @@ LESION_COLUMNS = [
     "case_id",
     "model",
     "device",
+    "postprocess",
     "gt_id",
     "recist_id",
     "prediction_id",
@@ -84,8 +95,11 @@ LESION_COLUMNS = [
     "runtime_s",
     "model_load_s",
     "inference_s",
+    "postprocess_s",
+    "wall_total_s",
     "MaxRAM_MB",
     "MaxGPU_Mem_MB",
+    "gpu_monitor_status",
     "gpu_sanity_ok",
     "score_protocol",
 ]
@@ -96,6 +110,10 @@ def _voxel_volume_ml(spacing_xyz: list[float] | np.ndarray) -> float:
     if len(sp) != 3:
         return float("nan")
     return float(sp[0] * sp[1] * sp[2] / 1000.0)
+
+
+def _fmt_opt(val: Any) -> Any:
+    return "" if val is None else val
 
 
 def _recompute_rows_from_npz(
@@ -183,7 +201,7 @@ def evaluate_run(
         for mf in sorted((model_dir / "metrics").glob("*.json")):
             record = json.loads(mf.read_text())
             metrics = dict(record.get("metrics", {}))
-            if gpu_tolerance_mb is not None and "MaxGPU_Mem_MB" in metrics:
+            if gpu_tolerance_mb is not None and metrics.get("MaxGPU_Mem_MB") is not None:
                 metrics["RankGPU_Mem_MB"] = ranking_gpu_memory(
                     metrics["MaxGPU_Mem_MB"],
                     gpu_tolerance_mb,
@@ -194,6 +212,7 @@ def evaluate_run(
             dataset = record.get("dataset", "")
             case_id = record.get("case_id", mf.stem.replace(".metrics", ""))
             device = record.get("device", "")
+            postprocess = record.get("postprocess", "none")
             spacing = record.get("spacing_xyz", [])
 
             rows = list(record.get("rows", []))
@@ -227,11 +246,15 @@ def evaluate_run(
                 "case_id": case_id,
                 "model": model_name,
                 "device": device,
-                "num_threads": record.get("num_threads", ""),
+                "physical_gpu_index": _fmt_opt(record.get("physical_gpu_index")),
+                "num_threads": _fmt_opt(record.get("num_threads")),
+                "postprocess": postprocess,
                 "status": status,
+                "monitor_source": record.get("monitor_source", ""),
+                "error": record.get("error", ""),
                 "n_lesions": record.get("n_lesions", len(rows)),
-                "shape_zyx": json.dumps(record.get("shape_zyx", [])),
-                "spacing_xyz": json.dumps(spacing),
+                "shape_zyx": json.dumps(record.get("shape_zyx", [])) if record.get("shape_zyx") else "",
+                "spacing_xyz": json.dumps(spacing) if spacing else "",
                 "mean_dice": round(mean(dices), 6) if dices else "",
                 "mean_post_dice": round(mean(post_dices), 6) if post_dices else "",
                 "source_sha256": record.get("source_sha256", ""),
@@ -239,7 +262,7 @@ def evaluate_run(
             }
             for col in CASE_COLUMNS:
                 if col not in case_row:
-                    case_row[col] = metrics.get(col, "")
+                    case_row[col] = _fmt_opt(metrics.get(col))
             case_rows.append(case_row)
             summary_buckets.setdefault((model_name, device), []).append(case_row)
 
@@ -270,19 +293,20 @@ def evaluate_run(
                         "case_id": case_id,
                         "model": model_name,
                         "device": device,
+                        "postprocess": postprocess,
                         "gt_id": gid,
-                        "recist_id": r.get("recist_id", ""),
+                        "recist_id": _fmt_opt(r.get("recist_id")),
                         "prediction_id": r.get("prediction_id", gid),
-                        "channel_index": r.get("channel_index", ""),
+                        "channel_index": _fmt_opt(r.get("channel_index")),
                         "status": r.get("status", ""),
-                        "gt_voxels": gt_vox if gt_vox is not None else "",
-                        "pred_voxels": pred_vox if pred_vox is not None else "",
-                        "intersection": r.get("intersection", "") if r.get("intersection") is not None else "",
+                        "gt_voxels": _fmt_opt(gt_vox),
+                        "pred_voxels": _fmt_opt(pred_vox),
+                        "intersection": _fmt_opt(r.get("intersection")),
                         "dice": round(float(r["dice"]), 6) if r.get("dice") is not None else "",
                         "gt_volume_ml": gt_vol_ml,
                         "pred_volume_ml": pred_vol_ml,
-                        "post_pred_voxels": pp_vox if pp_vox is not None else "",
-                        "post_intersection": pp.get("post_intersection", "") if pp.get("post_intersection") is not None else "",
+                        "post_pred_voxels": _fmt_opt(pp_vox),
+                        "post_intersection": _fmt_opt(pp.get("post_intersection")),
                         "post_dice": (
                             round(float(pp["post_dice"]), 6)
                             if pp.get("post_dice") is not None
@@ -291,12 +315,15 @@ def evaluate_run(
                         "post_pred_volume_ml": pp_vol_ml,
                         "post_action": pp.get("post_action", ""),
                         "lesion_inference_s": lesion_times.get(str(gid), ""),
-                        "runtime_s": metrics.get("runtime_s", ""),
-                        "model_load_s": metrics.get("model_load_s", ""),
-                        "inference_s": metrics.get("inference_s", ""),
-                        "MaxRAM_MB": metrics.get("MaxRAM_MB", ""),
-                        "MaxGPU_Mem_MB": metrics.get("MaxGPU_Mem_MB", ""),
-                        "gpu_sanity_ok": metrics.get("gpu_sanity_ok", ""),
+                        "runtime_s": _fmt_opt(metrics.get("runtime_s")),
+                        "model_load_s": _fmt_opt(metrics.get("model_load_s")),
+                        "inference_s": _fmt_opt(metrics.get("inference_s")),
+                        "postprocess_s": _fmt_opt(metrics.get("postprocess_s")),
+                        "wall_total_s": _fmt_opt(metrics.get("wall_total_s")),
+                        "MaxRAM_MB": _fmt_opt(metrics.get("MaxRAM_MB")),
+                        "MaxGPU_Mem_MB": _fmt_opt(metrics.get("MaxGPU_Mem_MB")),
+                        "gpu_monitor_status": metrics.get("gpu_monitor_status", ""),
+                        "gpu_sanity_ok": _fmt_opt(metrics.get("gpu_sanity_ok")),
                         "score_protocol": r.get("score_protocol", "independent_same_id_raw_v2"),
                     }
                 )
@@ -310,19 +337,35 @@ def evaluate_run(
             if lr["model"] == model_name and lr["device"] == device and lr["dice"] != ""
         ]
 
-        def _vals(col: str) -> list[float]:
-            return [float(r[col]) for r in ok_rows if r.get(col, "") != ""]
+        def _vals(col: str, *, include_failed: bool = False) -> list[float]:
+            src = rows_group if include_failed else ok_rows
+            return [float(r[col]) for r in src if r.get(col, "") not in ("", None)]
 
         ram_vals = _vals("MaxRAM_MB")
         gpu_vals = _vals("MaxGPU_Mem_MB")
         rt_vals = _vals("runtime_s")
         load_vals = _vals("model_load_s")
         inf_vals = _vals("inference_s")
+        post_vals = _vals("postprocess_s")
+        wall_vals = _vals("wall_total_s")
         auc_ram_vals = _vals("AUC_RAM_Time_MB_s")
         cpu_vals = _vals("MaxCPU_Utilization_pct")
         auc_gpu_vals = _vals("AUC_GPU_Time_MB_s")
         rank_gpu_vals = _vals("RankGPU_Mem_MB")
-        sanity_vals = [bool(r["gpu_sanity_ok"]) for r in ok_rows if r.get("gpu_sanity_ok") != ""]
+
+        raw_sanity = [r["gpu_sanity_ok"] for r in ok_rows if r.get("gpu_sanity_ok", "") != ""]
+        if not ok_rows or not raw_sanity:
+            all_sanity: Any = ""
+        elif any(v is False for v in raw_sanity):
+            all_sanity = False
+        elif len(raw_sanity) < len(ok_rows):
+            all_sanity = ""
+        else:
+            all_sanity = True
+
+        statuses_seen = sorted(
+            {str(r["gpu_monitor_status"]) for r in rows_group if r.get("gpu_monitor_status")}
+        )
 
         summary_rows.append(
             {
@@ -340,6 +383,8 @@ def evaluate_run(
                 "mean_runtime_s": round(mean(rt_vals), 4) if rt_vals else "",
                 "mean_model_load_s": round(mean(load_vals), 4) if load_vals else "",
                 "mean_inference_s": round(mean(inf_vals), 4) if inf_vals else "",
+                "mean_postprocess_s": round(mean(post_vals), 4) if post_vals else "",
+                "mean_wall_total_s": round(mean(wall_vals), 4) if wall_vals else "",
                 "mean_MaxRAM_MB": round(mean(ram_vals), 2) if ram_vals else "",
                 "max_MaxRAM_MB": round(max(ram_vals), 2) if ram_vals else "",
                 "mean_AUC_RAM_Time_MB_s": round(mean(auc_ram_vals), 2) if auc_ram_vals else "",
@@ -347,7 +392,8 @@ def evaluate_run(
                 "mean_MaxGPU_Mem_MB": round(mean(gpu_vals), 2) if gpu_vals else "",
                 "mean_AUC_GPU_Time_MB_s": round(mean(auc_gpu_vals), 2) if auc_gpu_vals else "",
                 "mean_RankGPU_Mem_MB": round(mean(rank_gpu_vals), 2) if rank_gpu_vals else "",
-                "all_gpu_sanity_ok": all(sanity_vals) if sanity_vals else "",
+                "gpu_monitor_statuses": ";".join(statuses_seen),
+                "all_gpu_sanity_ok": all_sanity,
             }
         )
 
@@ -374,6 +420,8 @@ def evaluate_run(
             "mean_runtime_s",
             "mean_model_load_s",
             "mean_inference_s",
+            "mean_postprocess_s",
+            "mean_wall_total_s",
             "mean_MaxRAM_MB",
             "max_MaxRAM_MB",
             "mean_AUC_RAM_Time_MB_s",
@@ -381,6 +429,7 @@ def evaluate_run(
             "mean_MaxGPU_Mem_MB",
             "mean_AUC_GPU_Time_MB_s",
             "mean_RankGPU_Mem_MB",
+            "gpu_monitor_statuses",
             "all_gpu_sanity_ok",
         ]
     )
@@ -397,7 +446,12 @@ def evaluate_run(
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--run-dir", required=True, type=Path, help="Benchmark output root")
+    ap.add_argument(
+        "--run-dir",
+        type=Path,
+        default=DEFAULT_RUN_DIR,
+        help=f"Benchmark output root (default: {DEFAULT_RUN_DIR})",
+    )
     ap.add_argument("--models", nargs="+", default=None, help="Optional subset of model folders")
     ap.add_argument(
         "--gpu-tolerance-mb",

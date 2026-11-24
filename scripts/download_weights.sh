@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ASSETS_DIR=${1:?usage: download_weights.sh <ASSETS_DIR>}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ASSETS_DIR=${1:-"$REPO_ROOT/assets"}
 MANIFEST="$REPO_ROOT/configs/weights.sha256"
 
 mkdir -p \

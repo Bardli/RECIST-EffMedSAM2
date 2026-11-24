@@ -4,7 +4,7 @@ Clean, standalone inference and efficiency-benchmarking suite for 3D CT lesion s
 
 - **Unified CPU & GPU execution** via native Python (`--device cpu` or `--device cuda --gpu-index N`), without private Docker dependencies.
 - **Per-case model reload & serial single-threaded default** (`--num-threads 1`) matching single-scan clinical usage and minimizing peak RAM.
-- **Embedded FLARE-Efficiency resource profiling** (aligned with [`medfm-flare/FLARE-Efficiency`](https://github.com/medfm-flare/FLARE-Efficiency)) recording phase-level runtime breakdown, process-tree RAM (`psutil` + `ru_maxrss`), and PID-scoped GPU memory (`nvidia-ml-py` + PyTorch CUDA stats) with automatic `GPU ≈ 0` sanity checking in CPU mode.
+- **Embedded FLARE-Efficiency resource profiling** (aligned with [`medfm-flare/FLARE-Efficiency`](https://github.com/medfm-flare/FLARE-Efficiency)) recording phase-level runtime breakdown (including postprocessing), process-tree RAM (`psutil` + `ru_maxrss`), PID-scoped GPU memory (`nvidia-ml-py` + PyTorch CUDA stats) mapped to the true physical GPU index, explicit `gpu_monitor_status` (`measured` vs `unavailable`/`query_failed`), and parent-side fallback monitoring so OOM/`SIGKILL`/crash runs still preserve resource telemetry.
 - **Independent-instance evaluation** (`independent_instances_v2`) scoring each prompted lesion channel without cross-lesion overlap overwriting or best-overlap rematching.
 
 ---
@@ -26,15 +26,19 @@ Clean, standalone inference and efficiency-benchmarking suite for 3D CT lesion s
 
 Each `(model, case)` pair runs sequentially in an isolated Python subprocess (`recist_effmedsam2.runner.run_case`):
 
-1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case run and are counted in `runtime_s` (`runtime_s = model_load_s + inference_s`). This reflects single-scan clinical deployment and prevents cross-case memory/allocator state from distorting peak RAM or VRAM measurements.
-2. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to stabilize CPU measurements and keep host RAM bounded. Override via `--num-threads N`.
-3. **Strict CPU isolation:** When `--device cpu` is selected, the runner forces `CUDA_VISIBLE_DEVICES=""` and `NVIDIA_VISIBLE_DEVICES="void"` prior to Python startup and verifies `torch.cuda.is_available() == False` inside the worker.
+1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case run and are counted in `runtime_s` (`runtime_s = model_load_s + inference_s + postprocess_s`). This reflects single-scan clinical deployment and prevents cross-case memory/allocator state from distorting peak RAM or VRAM measurements.
+2. **Postprocessing inside profiler scope:** When `--postprocess moving_centroid` is enabled, clipping and postprocessed NPZ saving + scoring execute inside the active `CaseProfiler` window so `postprocess_s`, `runtime_s`, `wall_total_s`, and `MaxRAM_MB` capture the complete workflow.
+3. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to stabilize CPU measurements and keep host RAM bounded. Override via `--num-threads N`.
+4. **Strict CPU isolation & physical GPU mapping:**
+   - `--device cpu`: forces `CUDA_VISIBLE_DEVICES=""` and `NVIDIA_VISIBLE_DEVICES="void"` prior to Python startup and asserts `torch.cuda.is_available() == False`, while querying **all** physical GPUs via NVML to verify zero hardware VRAM usage.
+   - `--device cuda --gpu-index N`: sets `CUDA_VISIBLE_DEVICES=N` (logical `cuda:0` inside the worker) and passes physical index `N` explicitly to NVML so VRAM sampling monitors physical card `N` rather than defaulting to GPU `0`.
+5. **Failure & OOM telemetry:** Both the worker (`try ... except BaseException`) and an external parent `ProcessTreeMonitor` capture RAM/CPU/GPU samples and write atomic JSON receipts. Even if a worker is killed by `SIGKILL` / Linux OOM killer, `case_metrics.csv` preserves `status=failed(...)`, `wall_total_s`, and observed peak RAM/GPU usage without leaving stale `ok` receipts.
 
 ---
 
 ## Installation
 
-SAM/EfficientTAM and nnInteractive can share one environment (if dependencies are compatible) or live in two separate virtual environments passed via `--sam-python` and `--nn-python`.
+SAM/EfficientTAM and nnInteractive can share one environment (if dependencies are compatible) or live in the default two virtual environments (`.venv-sam` and `.venv-nn`, auto-detected by `recist-benchmark`).
 
 ### 1. Core package (runner, profiler, prompt utilities, evaluator)
 
@@ -49,7 +53,7 @@ pip install -r requirements/core.txt
 pip install -e .
 ```
 
-### 2. SAM / EfficientMedSAM2 environment (CPU or GPU)
+### 2. SAM / EfficientMedSAM2 environment (`.venv-sam`, CPU or GPU)
 
 **CPU-only:**
 ```bash
@@ -70,12 +74,12 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision
 pip install -r requirements/sam.txt
-pip install --no-build-isolation \
+pip install -no-build-isolation \
   "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
 pip install -e . --no-deps
 ```
 
-### 3. nnInteractive environment (CPU or GPU)
+### 3. nnInteractive environment (`.venv-nn`, CPU or GPU)
 
 ```bash
 python3 -m venv .venv-nn
@@ -89,25 +93,40 @@ pip install -e . --no-deps
 
 ---
 
-## Weights Download & Checksum Verification
+## Default Directory Layout & Weights
 
-Download the public Hugging Face checkpoints (`MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0`) and verify SHA-256 checksums against `configs/weights.sha256`:
+By default, `recist-benchmark` and `scripts/download_weights.sh` use repository-relative paths (all ignored by `.gitignore`):
 
-```bash
-export ASSETS=/path/to/model_assets
-bash scripts/download_weights.sh "$ASSETS"
+```text
+RECIST-EffMedSAM2/
+├── data/
+│   ├── inputs/           # default --input-dir (*.npz)
+│   └── window_twins/     # optional, auto-detected for SAM when data/inputs/ is used
+├── assets/               # default --assets-dir
+├── .venv-sam/            # auto-detected --sam-python
+├── .venv-nn/             # auto-detected --nn-python
+└── runs/
+    └── benchmark/        # default --output-dir
 ```
 
-Expected layout under `$ASSETS`:
+Download the public Hugging Face checkpoints (`MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0`) into `assets/` and verify SHA-256 checksums against `configs/weights.sha256`:
 
-| Model | Relative Path under `$ASSETS/` | SHA-256 |
+```bash
+bash scripts/download_weights.sh        # defaults to ./assets
+# or specify a custom directory:
+bash scripts/download_weights.sh /path/to/model_assets
+```
+
+Expected layout under `assets/` (or custom `$ASSETS`):
+
+| Model | Relative Path under `assets/` | SHA-256 |
 |---|---|---|
 | `medsam2_box` | `MedSAM2-RECIST/checkpoints/medsam2_FLARE25_RECIST_baseline.pt` | `890e6e10924984c7b704a1984362c53a56dc0ee27c796a34eb49c83a1dc4a144` |
 | `nninteractive_*` | `nninteractive_hf_models/models/nnInteractive_v1.0/` (`fold_0/checkpoint_final.pth`, `plans.json`, `dataset.json`, `inference_session_class.json`) | Verified in `configs/weights.sha256` |
 | `efftiny_m8_ep40_box` | `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` | `0b377887f5587cbfd42dbc739a1711f30db276f3fd4c849233df2142ee4f5f5d` |
 | `effsmall_m8_ep40_box` (optional) | `RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` | `423793cec97e9ec93b70c25fbff1c8267d1a1f58deed254b79e16caf7b489fb3` |
 
-Place the fine-tuned `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` checkpoint into `$ASSETS` and pass `--verify-sha256` to enforce strict pre-run verification.
+Place `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` into `assets/` and pass `--verify-sha256` to enforce strict pre-run verification.
 
 ---
 
@@ -117,7 +136,7 @@ Each input `.npz` file represents one 3D CT case with arrays in `(Z, Y, X)` voxe
 
 - `imgs`:
   - **Raw HU (`nifti_stored_scaled_v1`):** stored CT array accompanied by `intensity_encoding="nifti_stored_scaled_v1"`, `hu_slope`, and `hu_intercept`. `ct_inputs.py` reconstructs float64 HU for nnInteractive and windows to L40/W400 (`[-160, 240]` -> `uint8 [0, 255]`) at the SAM model boundary.
-  - **Pre-windowed SAM input:** `uint8` 3D array in `[0, 255]`. If SAM models require a separate pre-windowed directory while nnInteractive reads raw HU, pass `--window-dir /path/to/windowed_npz`.
+  - **Pre-windowed SAM input:** `uint8` 3D array in `[0, 255]`. If SAM models require a separate pre-windowed directory while nnInteractive reads raw HU, place twins in `data/window_twins/` (auto-detected) or pass `--window-dir /path/to/windowed_npz`.
 - `recist`: integer `(Z, Y, X)` label array with non-zero lesion IDs drawn on each lesion's axial RECIST slice.
 - `spacing`: float `(3,)` physical spacing `[sx, sy, sz]` in mm.
 - `gts` (or `gts_hidden`, optional): integer `(Z, Y, X)` ground-truth mask for Dice/volume evaluation (never used as a prompt source for RECIST modes).
@@ -126,23 +145,17 @@ Each input `.npz` file represents one 3D CT case with arrays in `(Z, Y, X)` voxe
 
 ## Running Inference
 
-### 1. Single-case CPU smoke test (`--limit 1`)
+### 1. Zero-flag Quick Start (using default `data/inputs/`, `assets/`, `.venv-sam/`, `.venv-nn/`)
 
 ```bash
-recist-benchmark \
-  --input-dir /path/to/dataset/cancer_type \
-  --output-dir runs/cpu_smoke \
-  --assets-dir "$ASSETS" \
-  --sam-python .venv-sam/bin/python \
-  --nn-python .venv-nn/bin/python \
-  --device cpu \
-  --num-threads 1 \
-  --limit 1 \
-  --verify-sha256 \
-  --plots
+# Single-case CPU smoke test
+recist-benchmark --limit 1 --verify-sha256 --plots
+
+# Full default CPU run on data/inputs/
+recist-benchmark --verify-sha256 --plots
 ```
 
-### 2. Full single cancer-type CPU run (with optional EAY window twins)
+### 2. Explicit paths (single cancer-type CPU run, with optional postprocessing)
 
 ```bash
 recist-benchmark \
@@ -154,38 +167,34 @@ recist-benchmark \
   --nn-python .venv-nn/bin/python \
   --device cpu \
   --num-threads 1 \
+  --postprocess moving_centroid \
   --verify-sha256 \
   --plots
 ```
 
-### 3. Running a single model or switching to GPU mode
+### 3. Running a single model or switching to GPU (including non-0 physical GPU)
 
 ```bash
 # Single model on CPU
 recist-benchmark \
   --input-dir /path/to/data \
   --output-dir runs/efftiny_cpu \
-  --assets-dir "$ASSETS" \
   --models efftiny_m8_ep40_box \
-  --sam-python .venv-sam/bin/python \
   --device cpu \
   --num-threads 1
 
-# GPU execution (same codebase, --device cuda --gpu-index 0)
+# GPU execution on physical GPU 2 (same codebase; NVML monitors physical GPU 2)
 recist-benchmark \
   --input-dir /path/to/data \
-  --output-dir runs/paper5_gpu \
-  --assets-dir "$ASSETS" \
-  --sam-python .venv-sam/bin/python \
-  --nn-python .venv-nn/bin/python \
+  --output-dir runs/paper5_gpu2 \
   --device cuda \
-  --gpu-index 0 \
+  --gpu-index 2 \
   --num-threads 1
 ```
 
 ### 4. Standalone backend CLIs
 
-Both backends also expose standalone CLIs that automatically reload the model per case and emit `.metrics.json` + `.npz`:
+Both backends also expose standalone CLIs (defaulting to `data/inputs/` -> `runs/sam/` or `runs/nninteractive/`):
 
 ```bash
 # SAM / EfficientMedSAM2
@@ -198,6 +207,7 @@ recist-sam-infer \
   --device cpu \
   --num-threads 1 \
   --prompt box \
+  --postprocess moving_centroid \
   --disable-image-encoder-compile
 
 # nnInteractive
@@ -211,13 +221,11 @@ recist-nninteractive-infer \
   --interaction batch
 ```
 
-Pass `--postprocess moving_centroid` to `recist-benchmark` (or `run_case`) to additionally compute slice-centered RECIST physical-radius clipping for `eff*` models into `predictions_postprocessed/` and `post_*` CSV columns without altering raw predictions.
-
 ---
 
 ## Performance & Resource Metrics
 
-Every case execution runs an embedded `CaseProfiler` (`src/recist_effmedsam2/profiling/monitor.py`) that mirrors [`medfm-flare/FLARE-Efficiency`](https://github.com/medfm-flare/FLARE-Efficiency) sampling (`0.1 s` default interval) and AUC integration, scoped strictly to the active worker process tree so shared workstations do not contaminate CPU or memory readings.
+Every case execution runs an embedded `CaseProfiler` (and parent `ProcessTreeMonitor`) in `src/recist_effmedsam2/profiling/monitor.py` that mirrors [`medfm-flare/FLARE-Efficiency`](https://github.com/medfm-flare/FLARE-Efficiency) sampling (`0.1 s` default interval) and AUC integration, scoped strictly to the active worker process tree.
 
 ### Runtime Breakdown (seconds via `time.perf_counter()`, CUDA-synchronized on GPU)
 
@@ -225,12 +233,12 @@ Every case execution runs an embedded `CaseProfiler` (`src/recist_effmedsam2/pro
 |---|---|---|
 | `model_load_s` | **Yes** | Network instantiation + checkpoint loading onto target device |
 | `inference_s` | **Yes** | Pure model inference across prompted lesions (state init/reset, prompt application, forward/reverse propagation or AutoZoom); **excludes** NPZ loading/decompression, preprocessing, and output saving |
-| `runtime_s` | **Total** | `model_load_s + inference_s` |
+| `postprocess_s` | **Yes** | Optional postprocessing (`moving_centroid`, inside `CaseProfiler`; `0.0` when `none`) |
+| `runtime_s` | **Total** | `model_load_s + inference_s + postprocess_s` |
 | `data_load_s` | No (audited separately) | NPZ disk load & decompression |
 | `preprocess_s` | No (audited separately) | HU decoding / L40-W400 windowing / RGB resize & normalization, or nnInteractive `set_image` preprocessing |
-| `postprocess_s` | No (audited separately) | Optional moving-centroid clipping (`0.0` when disabled) |
-| `save_s` | No (audited separately) | Streamed independent-instance compressed NPZ write & CRC check |
-| `wall_total_s` | No (audited separately) | Complete case worker wall-clock time |
+| `save_s` | No (audited separately) | Streamed independent-instance compressed NPZ write (raw + postprocessed) & CRC check |
+| `wall_total_s` | No (audited separately) | Complete end-to-end case worker wall-clock time across all phases |
 
 Per-lesion inference durations are also preserved under `per_lesion_inference_s` in each `<case>.metrics.json`.
 
@@ -245,13 +253,14 @@ Per-lesion inference durations are also preserved under `per_lesion_inference_s`
 | `AUC_RAM_Time_MB_s` | MiB·s | Trapezoidal area under process-tree RSS vs. time |
 | `MaxCPU_Utilization_pct` | % | Peak normalized process-tree CPU utilization (0–100%) |
 | `AUC_CPU_Time_pct_s` | %·s | Trapezoidal area under CPU utilization vs. time |
-| `MaxGPU_Mem_MB` | MiB | `max(PID-scoped NVML peak, PyTorch peak reserved)` |
-| `gpu_nvml_peak_mb` | MiB | Peak PID-scoped GPU memory queried via `pynvml` (`nvidia-ml-py`, fallback `nvidia-smi`) |
-| `AUC_GPU_Time_MB_s` | MiB·s | Trapezoidal area under PID-scoped GPU memory vs. time |
-| `RankGPU_Mem_MB` | MiB | `round(max(0.0, MaxGPU_Mem_MB - gpu_tolerance_mb))` (default tolerance: `4096.0 MiB`) |
+| `MaxGPU_Mem_MB` | MiB | `max(PID-scoped NVML peak, PyTorch peak reserved)`, or blank (`None`) if GPU memory could not be queried |
+| `gpu_nvml_peak_mb` | MiB | Peak PID-scoped GPU memory queried via `pynvml` (`nvidia-ml-py`, fallback `nvidia-smi`), or blank (`None`) if unmeasured/failed |
+| `AUC_GPU_Time_MB_s` | MiB·s | Trapezoidal area under PID-scoped GPU memory vs. time (`None` if unmeasured) |
+| `RankGPU_Mem_MB` | MiB | `round(max(0.0, MaxGPU_Mem_MB - gpu_tolerance_mb))` (default tolerance: `4096.0 MiB`; blank if `MaxGPU_Mem_MB` is blank) |
 | `gpu_torch_peak_allocated_mb` | MiB | `torch.cuda.max_memory_allocated()` (`0.0` on CPU) |
 | `gpu_torch_peak_reserved_mb` | MiB | `torch.cuda.max_memory_reserved()` (`0.0` on CPU) |
-| `gpu_sanity_ok` | bool | In CPU mode: `True` iff `MaxGPU_Mem_MB == 0.0`, `gpu_torch_peak_allocated_mb == 0.0`, `gpu_torch_peak_reserved_mb == 0.0`, and `not torch.cuda.is_available()` |
+| `gpu_monitor_status` | str | `measured` (all driver queries succeeded), `partial`, `query_failed`, or `unavailable` (no NVIDIA tooling/GPU) |
+| `gpu_sanity_ok` | bool/blank | On CPU: `True` only when `gpu_monitor_status == "measured"` and VRAM == `0.0` and CUDA is unavailable; `False` on `query_failed`/`partial`/non-zero/CUDA available; blank (`None`) when `unavailable` |
 
 ---
 
@@ -263,27 +272,28 @@ After inference completes, `compute_metrics.py` automatically writes three CSV r
 <output-dir>/
 ├── run_manifest.json
 ├── <model_name>/
-│   ├── predictions/<case_id>.npz          # independent_instances_v2: segs[N,Z,Y,X], instance_ids, prediction_status, spacing
-│   ├── metrics/<case_id>.metrics.json     # full breakdown, resource samples, host info, per-lesion counts
+│   ├── predictions/<case_id>.npz                # independent_instances_v2 raw predictions
+│   ├── predictions_postprocessed/<case_id>.npz  # optional postprocessed predictions (--postprocess moving_centroid)
+│   ├── metrics/<case_id>.metrics.json           # full breakdown, resource samples, host info, per-lesion counts
 │   ├── logs/<case_id>.log
-│   └── plots/                             # optional CPU/RAM/GPU-vs-time PNGs (--plots)
+│   └── plots/                                   # optional CPU/RAM/GPU-vs-time PNGs (--plots)
 └── reports/
-    ├── case_metrics.csv                   # 1 row per (model, case): timing breakdown, RAM, GPU, sanity check, mean Dice
-    ├── lesion_scores.csv                  # 1 row per (model, case, lesion): independent same-ID Dice, volumes (mL), timings
-    └── model_summary.csv                  # 1 row per (model, device): aggregated Dice & efficiency averages
+    ├── case_metrics.csv                         # 1 row per (model, case): timing breakdown, RAM, GPU, monitor status, mean Dice
+    ├── lesion_scores.csv                        # 1 row per (model, case, lesion): independent same-ID Dice, volumes (mL), timings
+    └── model_summary.csv                        # 1 row per (model, device): aggregated Dice & efficiency averages
 ```
 
 To re-evaluate or recompute rankings with a different GPU tolerance without re-running inference:
 
 ```bash
-recist-eval --run-dir runs/eay_colon_cpu --verify-from-npz --gpu-tolerance-mb 4096
+recist-eval --run-dir runs/benchmark --verify-from-npz --gpu-tolerance-mb 4096
 ```
 
 ---
 
 ## Running Tests
 
-Offline unit and end-to-end synthetic tests validate phase breakdown math, `runtime_s = model_load_s + inference_s`, process-tree RAM tracking, CPU `gpu_sanity_ok == True` (even on shared GPU machines), independent-instance storage, prompt geometry, moving-centroid postprocessing, and CSV generation without requiring real CT scans or checkpoints:
+Offline unit and end-to-end synthetic tests validate phase breakdown math (`runtime_s = model_load_s + inference_s + postprocess_s`), in-profiler postprocessing, exception and `SIGKILL` failure resource capture, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), non-0 `CUDA_VISIBLE_DEVICES` -> physical GPU resolution, independent-instance storage, prompt geometry, and CSV generation:
 
 ```bash
 pytest -v

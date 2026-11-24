@@ -21,7 +21,8 @@ from typing import Any
 import numpy as np
 
 from ..ct_inputs import abdomen_image
-from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, CaseProfiler
+from ..postprocess import finalize_and_save_predictions
+from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, CaseProfiler, write_json_atomic
 from ..profiling.report import plot_case
 from ..storage import IndependentPredictionWriter, sha256
 
@@ -277,14 +278,6 @@ def build_predictor(
     return predictor, ckpt
 
 
-def _parse_gpu_index(device: str) -> int | None:
-    if device == "cpu":
-        return None
-    if ":" in device:
-        return int(device.split(":", 1)[1])
-    return 0
-
-
 def run_case(
     *,
     input_npz: str | Path,
@@ -293,6 +286,7 @@ def run_case(
     backend: str,
     model_size: str,
     device: str = "cpu",
+    gpu_index: int | None = None,
     weights: str | None = None,
     cfg: str | None = None,
     prompt: str = "box",
@@ -309,6 +303,7 @@ def run_case(
     plots_dir: str | Path | None = None,
     model_name: str | None = None,
     dataset_name: str | None = None,
+    postprocess: str = "none",
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run fresh-model-reload inference and efficiency profiling for one case."""
@@ -341,198 +336,234 @@ def run_case(
     input_path = Path(input_npz).resolve()
     case_id = input_path.stem
     eff_model_name = model_name or f"{backend}_{model_size}_{prompt}"
+    metrics_path = Path(metrics_json)
 
     with CaseProfiler(
         device=device,
-        gpu_index=_parse_gpu_index(device),
+        gpu_index=gpu_index,
         sample_interval=sample_interval,
         gpu_tolerance_mb=gpu_tolerance_mb,
     ) as profiler:
-        # 1. Model load (counted in runtime_s)
-        with profiler.phase("model_load"):
-            predictor, ckpt_path = build_predictor(
-                backend=backend,
-                model_size=model_size,
-                device=device,
-                weights=weights,
-                cfg=cfg,
-                disable_image_encoder_compile=disable_image_encoder_compile,
-            )
+        predictor = None
+        try:
+            # 1. Model load (counted in runtime_s)
+            with profiler.phase("model_load"):
+                predictor, ckpt_path = build_predictor(
+                    backend=backend,
+                    model_size=model_size,
+                    device=device,
+                    weights=weights,
+                    cfg=cfg,
+                    disable_image_encoder_compile=disable_image_encoder_compile,
+                )
 
-        # 2. Data load & decompression (excluded from runtime_s)
-        with profiler.phase("data_load"):
-            with np.load(input_path, allow_pickle=False) as npz_data:
-                spacing = np.asarray(npz_data["spacing"])
-                recist = np.asarray(npz_data["recist"])
-                gts_3d, resolved_gt_key = load_gt(npz_data, gt_key, input_path.name, gts_path)
-                if window_npz is not None:
-                    with np.load(Path(window_npz).resolve(), allow_pickle=False) as w_data:
-                        img_3d_ori = abdomen_image(w_data, require_raw=False)
+            # 2. Data load & decompression (excluded from runtime_s)
+            with profiler.phase("data_load"):
+                with np.load(input_path, allow_pickle=False) as npz_data:
+                    spacing = np.asarray(npz_data["spacing"])
+                    recist = np.asarray(npz_data["recist"])
+                    gts_3d, resolved_gt_key = load_gt(npz_data, gt_key, input_path.name, gts_path)
+                    if window_npz is not None:
+                        with np.load(Path(window_npz).resolve(), allow_pickle=False) as w_data:
+                            img_3d_ori = abdomen_image(w_data, require_raw=False)
+                    else:
+                        img_3d_ori = abdomen_image(npz_data, require_raw=require_raw_hu)
+                if img_3d_ori.shape != recist.shape:
+                    raise ValueError(f"Image shape {img_3d_ori.shape} != RECIST shape {recist.shape}")
+                if np.max(img_3d_ori) >= 256:
+                    raise ValueError("SAM input image intensities must lie in [0, 255]")
+
+            # 3. Resize + RGB + ImageNet normalization (excluded from runtime_s)
+            with profiler.phase("preprocess"):
+                video_height, video_width = img_3d_ori.shape[1], img_3d_ori.shape[2]
+                if (video_height, video_width) != (IMAGE_SIZE, IMAGE_SIZE):
+                    img_resized = resize_grayscale_to_rgb_and_resize(img_3d_ori, IMAGE_SIZE)
                 else:
-                    img_3d_ori = abdomen_image(npz_data, require_raw=require_raw_hu)
-            if img_3d_ori.shape != recist.shape:
-                raise ValueError(f"Image shape {img_3d_ori.shape} != RECIST shape {recist.shape}")
-            if np.max(img_3d_ori) >= 256:
-                raise ValueError("SAM input image intensities must lie in [0, 255]")
+                    img_resized = img_3d_ori[:, None].repeat(3, axis=1).astype(np.float32)
+                img_tensor = torch.from_numpy(img_resized / 255.0)
+                img_mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32)[:, None, None]
+                img_std = torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
+                img_tensor -= img_mean
+                img_tensor /= img_std
 
-        # 3. Resize + RGB + ImageNet normalization (excluded from runtime_s)
-        with profiler.phase("preprocess"):
-            video_height, video_width = img_3d_ori.shape[1], img_3d_ori.shape[2]
-            if (video_height, video_width) != (IMAGE_SIZE, IMAGE_SIZE):
-                img_resized = resize_grayscale_to_rgb_and_resize(img_3d_ori, IMAGE_SIZE)
-            else:
-                img_resized = img_3d_ori[:, None].repeat(3, axis=1).astype(np.float32)
-            img_tensor = torch.from_numpy(img_resized / 255.0)
-            img_mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32)[:, None, None]
-            img_std = torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
-            img_tensor -= img_mean
-            img_tensor /= img_std
-
-        unique_labs = [int(x) for x in np.unique(recist) if x != 0]
-        metadata = {
-            "dataset": dataset_name or "",
-            "case_id": case_id,
-            "model": eff_model_name,
-            "backend": backend,
-            "model_size": model_size,
-            "prompt": prompt,
-            "device": device,
-            "num_threads": int(torch.get_num_threads()),
-            "source_npz": str(input_path),
-            "source_sha256": sha256(input_path),
-            "checkpoint_path": str(ckpt_path),
-            "checkpoint_sha256": sha256(ckpt_path),
-            "gt_key": resolved_gt_key,
-        }
-
-        with IndependentPredictionWriter(
-            shape=img_3d_ori.shape,
-            recist=recist,
-            spacing=spacing,
-            gt=gts_3d,
-            metadata=metadata,
-            scratch=scratch,
-        ) as writer:
-            # 4. Pure model inference (counted in runtime_s)
-            with profiler.phase("inference"):
-                with torch.inference_mode():
-                    for ulab in unique_labs:
-                        recist_per_lab = (recist == ulab) * ulab
-                        z_indices = np.unique(np.where(recist == ulab)[0])
-                        if len(z_indices) != 1:
-                            raise ValueError(
-                                f"Expected one z slice for recist=={ulab}, got {z_indices.tolist()}"
-                            )
-                        z_mid_orig = int(z_indices[0])
-                        diameter = recist_diameter(recist_per_lab[z_mid_orig])
-                        z_span = diameter * (((spacing[0] + spacing[1]) / 2.0) / spacing[2])
-                        half_z = int(z_span * Z_SLAB_SCALE / 2.0)
-                        z_lo = max(0, z_mid_orig - half_z)
-                        z_hi = min(img_3d_ori.shape[0] - 1, z_mid_orig + half_z)
-                        if backend == "medsam2":
-                            z_lo, z_hi = 0, img_3d_ori.shape[0] - 1
-
-                        recist_crop = recist_per_lab[z_lo : z_hi + 1]
-                        img_crop = img_tensor[z_lo : z_hi + 1]
-                        z_mid = z_mid_orig - z_lo
-                        box_2d = recist_bbox(recist_crop[z_mid], scale=BOX_SCALE, shift=shift)
-                        pts = None if prompt == "box" else prompt_points(recist_crop[z_mid], prompt)
-
-                        if torch_device.type == "cuda":
-                            torch.cuda.synchronize(torch_device)
-                        t_lesion = time.perf_counter()
-
-                        writer.mark_attempted(ulab)
-                        inference_state = predictor.init_state(img_crop, video_height, video_width)
-                        if prompt == "box":
-                            _, _, logits = predictor.add_new_points_or_box(
-                                inference_state=inference_state,
-                                frame_idx=z_mid,
-                                obj_id=1,
-                                box=box_2d,
-                            )
-                        else:
-                            _, _, logits = predictor.add_new_points_or_box(
-                                inference_state=inference_state,
-                                frame_idx=z_mid,
-                                obj_id=1,
-                                points=pts,
-                                labels=np.ones(len(pts)),
-                            )
-                        mask_prompt = (logits[0] > 0.0).squeeze(0).cpu().numpy().astype(np.uint8)
-
-                        # Forward propagation
-                        _, _, masks = predictor.add_new_mask(
-                            inference_state,
-                            frame_idx=z_mid,
-                            obj_id=1,
-                            mask=mask_prompt,
-                        )
-                        writer.write_slice(ulab, z_mid_orig, (masks[0] > 0.0).cpu().numpy()[0])
-                        for fi, _, lg in predictor.propagate_in_video(
-                            inference_state,
-                            start_frame_idx=z_mid,
-                            reverse=False,
-                        ):
-                            writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
-
-                        # Reset and reverse propagation
-                        predictor.reset_state(inference_state)
-                        inference_state = predictor.init_state(img_crop, video_height, video_width)
-                        predictor.add_new_mask(
-                            inference_state,
-                            frame_idx=z_mid,
-                            obj_id=1,
-                            mask=mask_prompt,
-                        )
-                        for fi, _, lg in predictor.propagate_in_video(
-                            inference_state,
-                            start_frame_idx=z_mid,
-                            reverse=True,
-                        ):
-                            writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
-                        predictor.reset_state(inference_state)
-
-                        if torch_device.type == "cuda":
-                            torch.cuda.synchronize(torch_device)
-                        profiler.record_lesion_time(ulab, time.perf_counter() - t_lesion)
-
-            # 5. Save compressed independent-instance NPZ (excluded from runtime_s)
-            with profiler.phase("save"):
-                receipt = writer.save(output_npz, overwrite=overwrite)
-
-        del predictor
-        gc.collect()
-        if torch_device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        record = profiler.finalize(
-            extra_metadata={
+            unique_labs = [int(x) for x in np.unique(recist) if x != 0]
+            metadata = {
                 "dataset": dataset_name or "",
                 "case_id": case_id,
                 "model": eff_model_name,
-                "family": "sam",
                 "backend": backend,
                 "model_size": model_size,
                 "prompt": prompt,
+                "device": device,
                 "num_threads": int(torch.get_num_threads()),
-                "n_lesions": len(receipt["instance_ids"]),
-                "shape_zyx": list(img_3d_ori.shape),
-                "spacing_xyz": [float(s) for s in spacing],
                 "source_npz": str(input_path),
-                "source_sha256": metadata["source_sha256"],
-                "prediction_npz": str(Path(output_npz).resolve()),
-                "prediction_sha256": receipt["output_sha256"],
+                "source_sha256": sha256(input_path),
                 "checkpoint_path": str(ckpt_path),
-                "checkpoint_sha256": metadata["checkpoint_sha256"],
-                "rows": receipt["rows"],
-                "status": "ok",
+                "checkpoint_sha256": sha256(ckpt_path),
+                "gt_key": resolved_gt_key,
             }
-        )
 
-    metrics_path = Path(metrics_json)
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path.write_text(json.dumps(record, indent=2) + "\n")
+            with IndependentPredictionWriter(
+                shape=img_3d_ori.shape,
+                recist=recist,
+                spacing=spacing,
+                gt=gts_3d,
+                metadata=metadata,
+                scratch=scratch,
+            ) as writer:
+                # 4. Pure model inference (counted in runtime_s)
+                with profiler.phase("inference"):
+                    with torch.inference_mode():
+                        for ulab in unique_labs:
+                            recist_per_lab = (recist == ulab) * ulab
+                            z_indices = np.unique(np.where(recist == ulab)[0])
+                            if len(z_indices) != 1:
+                                raise ValueError(
+                                    f"Expected one z slice for recist=={ulab}, got {z_indices.tolist()}"
+                                )
+                            z_mid_orig = int(z_indices[0])
+                            diameter = recist_diameter(recist_per_lab[z_mid_orig])
+                            z_span = diameter * (((spacing[0] + spacing[1]) / 2.0) / spacing[2])
+                            half_z = int(z_span * Z_SLAB_SCALE / 2.0)
+                            z_lo = max(0, z_mid_orig - half_z)
+                            z_hi = min(img_3d_ori.shape[0] - 1, z_mid_orig + half_z)
+                            if backend == "medsam2":
+                                z_lo, z_hi = 0, img_3d_ori.shape[0] - 1
+
+                            recist_crop = recist_per_lab[z_lo : z_hi + 1]
+                            img_crop = img_tensor[z_lo : z_hi + 1]
+                            z_mid = z_mid_orig - z_lo
+                            box_2d = recist_bbox(recist_crop[z_mid], scale=BOX_SCALE, shift=shift)
+                            pts = None if prompt == "box" else prompt_points(recist_crop[z_mid], prompt)
+
+                            if torch_device.type == "cuda":
+                                torch.cuda.synchronize(torch_device)
+                            t_lesion = time.perf_counter()
+
+                            writer.mark_attempted(ulab)
+                            inference_state = predictor.init_state(img_crop, video_height, video_width)
+                            if prompt == "box":
+                                _, _, logits = predictor.add_new_points_or_box(
+                                    inference_state=inference_state,
+                                    frame_idx=z_mid,
+                                    obj_id=1,
+                                    box=box_2d,
+                                )
+                            else:
+                                _, _, logits = predictor.add_new_points_or_box(
+                                    inference_state=inference_state,
+                                    frame_idx=z_mid,
+                                    obj_id=1,
+                                    points=pts,
+                                    labels=np.ones(len(pts)),
+                                )
+                            mask_prompt = (logits[0] > 0.0).squeeze(0).cpu().numpy().astype(np.uint8)
+
+                            # Forward propagation
+                            _, _, masks = predictor.add_new_mask(
+                                inference_state,
+                                frame_idx=z_mid,
+                                obj_id=1,
+                                mask=mask_prompt,
+                            )
+                            writer.write_slice(ulab, z_mid_orig, (masks[0] > 0.0).cpu().numpy()[0])
+                            for fi, _, lg in predictor.propagate_in_video(
+                                inference_state,
+                                start_frame_idx=z_mid,
+                                reverse=False,
+                            ):
+                                writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
+
+                            # Reset and reverse propagation
+                            predictor.reset_state(inference_state)
+                            inference_state = predictor.init_state(img_crop, video_height, video_width)
+                            predictor.add_new_mask(
+                                inference_state,
+                                frame_idx=z_mid,
+                                obj_id=1,
+                                mask=mask_prompt,
+                            )
+                            for fi, _, lg in predictor.propagate_in_video(
+                                inference_state,
+                                start_frame_idx=z_mid,
+                                reverse=True,
+                            ):
+                                writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
+                            predictor.reset_state(inference_state)
+
+                            if torch_device.type == "cuda":
+                                torch.cuda.synchronize(torch_device)
+                            profiler.record_lesion_time(ulab, time.perf_counter() - t_lesion)
+
+                # 5. Optional postprocess (counted in runtime_s) + compressed NPZ save
+                receipt, post_npz, post_rows = finalize_and_save_predictions(
+                    writer,
+                    output_npz,
+                    profiler=profiler,
+                    postprocess=postprocess,
+                    overwrite=overwrite,
+                    scratch=scratch,
+                )
+
+            del predictor
+            predictor = None
+            gc.collect()
+            if torch_device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            record = profiler.finalize(
+                extra_metadata={
+                    "dataset": dataset_name or "",
+                    "case_id": case_id,
+                    "model": eff_model_name,
+                    "family": "sam",
+                    "backend": backend,
+                    "model_size": model_size,
+                    "prompt": prompt,
+                    "postprocess": postprocess,
+                    "num_threads": int(torch.get_num_threads()),
+                    "n_lesions": len(receipt["instance_ids"]),
+                    "shape_zyx": list(img_3d_ori.shape),
+                    "spacing_xyz": [float(s) for s in spacing],
+                    "source_npz": str(input_path),
+                    "source_sha256": metadata["source_sha256"],
+                    "prediction_npz": str(Path(output_npz).resolve()),
+                    "prediction_sha256": receipt["output_sha256"],
+                    "postprocessed_prediction_npz": str(post_npz.resolve()) if post_npz else None,
+                    "checkpoint_path": str(ckpt_path),
+                    "checkpoint_sha256": metadata["checkpoint_sha256"],
+                    "rows": receipt["rows"],
+                    "postprocessed_rows": post_rows,
+                    "status": "ok",
+                }
+            )
+        except BaseException as exc:
+            if predictor is not None:
+                del predictor
+            gc.collect()
+            fail_record = profiler.finalize(
+                extra_metadata={
+                    "dataset": dataset_name or "",
+                    "case_id": case_id,
+                    "model": eff_model_name,
+                    "family": "sam",
+                    "backend": backend,
+                    "model_size": model_size,
+                    "prompt": prompt,
+                    "postprocess": postprocess,
+                    "num_threads": int(torch.get_num_threads()),
+                    "source_npz": str(input_path),
+                    "status": "failed(exception)",
+                    "error": repr(exc),
+                    "rows": [],
+                }
+            )
+            write_json_atomic(metrics_path, fail_record)
+            if plots_dir is not None:
+                plot_case(fail_record, Path(plots_dir))
+            raise
+
+    write_json_atomic(metrics_path, record)
     if plots_dir is not None:
         plot_case(record, Path(plots_dir))
     return record
@@ -540,13 +571,26 @@ def run_case(
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-i", "--input", required=True, type=Path, help="Input NPZ file or directory")
-    ap.add_argument("-o", "--output-dir", required=True, type=Path, help="Output directory")
+    ap.add_argument(
+        "-i",
+        "--input",
+        type=Path,
+        default=Path("data/inputs"),
+        help="Input NPZ file or directory (default: data/inputs)",
+    )
+    ap.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=Path("runs/sam"),
+        help="Output directory (default: runs/sam)",
+    )
     ap.add_argument("--backend", choices=("eff", "medsam2"), default="eff")
     ap.add_argument("--model-size", choices=("small", "tiny"), default="tiny")
     ap.add_argument("--weights", type=str, default=None, help="Path to local checkpoint (.pt)")
     ap.add_argument("--cfg", type=str, default=None, help="YAML config path (optional)")
     ap.add_argument("--device", type=str, default="cpu", help="cpu | cuda | cuda:N")
+    ap.add_argument("--gpu-index", type=int, default=None, help="Physical GPU index for NVML monitoring")
     ap.add_argument("--prompt", choices=PROMPT_CHOICES, default="box")
     ap.add_argument("--shift", type=int, default=0)
     ap.add_argument("--gt-key", choices=("auto", "gts", "gts_hidden"), default="auto")
@@ -559,6 +603,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--gpu-tolerance-mb", type=float, default=DEFAULT_GPU_TOLERANCE_MB)
     ap.add_argument("--model-name", type=str, default=None)
     ap.add_argument("--dataset", type=str, default=None)
+    ap.add_argument("--postprocess", choices=("none", "moving_centroid"), default="none")
     ap.add_argument("--plots", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
     return ap
@@ -592,6 +637,7 @@ def main() -> int:
             backend=args.backend,
             model_size=args.model_size,
             device=args.device,
+            gpu_index=args.gpu_index,
             weights=args.weights,
             cfg=args.cfg,
             prompt=args.prompt,
@@ -607,13 +653,15 @@ def main() -> int:
             plots_dir=plots_dir,
             model_name=args.model_name,
             dataset_name=args.dataset,
+            postprocess=args.postprocess,
             overwrite=args.overwrite,
         )
         m = rec["metrics"]
+        gpu_str = f"{m['MaxGPU_Mem_MB']:.1f} MiB" if m["MaxGPU_Mem_MB"] is not None else "N/A"
         print(
             f"[done] {npz_path.name} | runtime={m['runtime_s']:.3f}s "
-            f"(load={m['model_load_s']:.3f}s, infer={m['inference_s']:.3f}s) | "
-            f"RAM={m['MaxRAM_MB']:.1f} MiB | GPU={m['MaxGPU_Mem_MB']:.1f} MiB | "
+            f"(load={m['model_load_s']:.3f}s, infer={m['inference_s']:.3f}s, post={m['postprocess_s']:.3f}s) | "
+            f"RAM={m['MaxRAM_MB']:.1f} MiB | GPU={gpu_str} ({m['gpu_monitor_status']}) | "
             f"sanity={m['gpu_sanity_ok']}"
         )
     return 0
