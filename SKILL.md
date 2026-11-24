@@ -26,65 +26,62 @@ Ask the user once **only** for details they have not already specified:
 ### Step 1: Preflight Check
 Inspect the host environment before creating venvs:
 ```bash
-python3 --version          # requires Python >= 3.10
-free -h                    # check host RAM before launching multi-GB 3D volumes
-df -h .                    # check disk space for venvs, checkpoints, and outputs
+uv --version || python3 --version   # prefer uv (auto-provisions Python 3.11); python3 >= 3.10 fallback on offline/HPC hosts
+free -h                             # check host RAM before launching multi-GB 3D volumes
+df -h .                             # check disk space for venvs, checkpoints, and outputs
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || echo "No NVIDIA GPU tooling detected"
 ```
 If `--device cuda` was requested, confirm the physical GPU index `--gpu-index N` exists in `nvidia-smi -L`.
 
-### Step 2: Create Virtual Environments
-Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. Note that both `requirements/sam.txt` and `requirements/nninteractive.txt` already include `requirements/core.txt`, so `.venv` is optional if the user only needs one model family.
+### Step 2: Create Virtual Environments (`uv venv` + `uv pip`)
+Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. Note that both `requirements/sam.txt` and `requirements/nninteractive.txt` already include `requirements/core.txt`, so `.venv` is optional if the user only needs one model family. *(If `uv` is unavailable on an offline/HPC host, fall back to `python3 -m venv` + `pip`.)*
 
-1. **Core package (`.venv` — runner, profiler, prompts, evaluator, pytest):**
+1. **Core package (`.venv`, optional — runner, profiler, prompts, evaluator, pytest):**
    ```bash
-   python3 -m venv .venv
-   .venv/bin/pip install --upgrade pip
-   .venv/bin/pip install -r requirements/core.txt pytest
-   .venv/bin/pip install -e .
+   uv venv --python 3.11 .venv
+   uv pip install --python .venv/bin/python -r requirements/core.txt pytest
+   uv pip install --python .venv/bin/python -e . --no-deps
    ```
 
 2. **SAM / EfficientMedSAM2 environment (`.venv-sam`):**
-   *(Install the pinned `MedSAM2` checkout editable `-e` so upstream EfficientTAM Hydra config files are preserved.)*
+   *(Install the pinned `MedSAM2` checkout editable `-e` so upstream EfficientTAM Hydra config files are preserved; `requirements/sam.txt` includes `setuptools` and `wheel` for `--no-build-isolation`.)*
    - **CPU-only:**
      ```bash
-     python3 -m venv .venv-sam
-     .venv-sam/bin/pip install --upgrade pip
-     .venv-sam/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-     .venv-sam/bin/pip install -r requirements/sam.txt
+     uv venv --python 3.11 .venv-sam
+     uv pip install --python .venv-sam/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cpu
+     uv pip install --python .venv-sam/bin/python -r requirements/sam.txt
      git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
      git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
-     SAM2_BUILD_CUDA=0 .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
-     .venv-sam/bin/pip install -e . --no-deps
+     SAM2_BUILD_CUDA=0 uv pip install --python .venv-sam/bin/python --no-build-isolation -e .venv-sam/src/MedSAM2
+     uv pip install --python .venv-sam/bin/python -e . --no-deps
      ```
    - **CUDA GPU:**
      ```bash
-     python3 -m venv .venv-sam
-     .venv-sam/bin/pip install --upgrade pip
-     .venv-sam/bin/pip install torch torchvision
-     .venv-sam/bin/pip install -r requirements/sam.txt
+     uv venv --python 3.11 .venv-sam
+     uv pip install --python .venv-sam/bin/python torch torchvision
+     uv pip install --python .venv-sam/bin/python -r requirements/sam.txt
      git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
      git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
-     .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
-     .venv-sam/bin/pip install -e . --no-deps
+     uv pip install --python .venv-sam/bin/python --no-build-isolation -e .venv-sam/src/MedSAM2
+     uv pip install --python .venv-sam/bin/python -e . --no-deps
      ```
 
 3. **nnInteractive environment (`.venv-nn`):**
    ```bash
-   python3 -m venv .venv-nn
-   .venv-nn/bin/pip install --upgrade pip
+   uv venv --python 3.11 .venv-nn
    # For CPU-only add: --index-url https://download.pytorch.org/whl/cpu
-   .venv-nn/bin/pip install torch torchvision
-   .venv-nn/bin/pip install -r requirements/nninteractive.txt
-   .venv-nn/bin/pip install -e . --no-deps
+   uv pip install --python .venv-nn/bin/python torch torchvision
+   uv pip install --python .venv-nn/bin/python -r requirements/nninteractive.txt
+   uv pip install --python .venv-nn/bin/python -e . --no-deps
    ```
 
 ### Step 3: Offline Self-Test
 Verify the runner, FLARE-style profiler, CT input loader, independent-instance storage, and evaluator before running real checkpoints:
 ```bash
-.venv/bin/pytest -v
+uv pip install --python .venv-sam/bin/python pytest   # or use .venv/bin/pytest if .venv was created
+.venv-sam/bin/pytest -v
 ```
-All tests must pass before proceeding.
+All offline tests must pass before proceeding (on CPU-only machines without CUDA PyTorch, `tests/test_cuda_cold_start.py` skips automatically).
 
 ### Step 4: Download & Verify Checkpoints
 Download the public `MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0` checkpoints into `./assets` and check SHA-256 checksums against `configs/weights.sha256`:
@@ -106,7 +103,7 @@ Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to 
 ### Step 6: Run 1-Case Smoke Test & Audit Telemetry
 Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots` (use `recist-benchmark` for multi-model comparisons, or `bash scripts/infer_effmedsam2.sh` / `bash scripts/infer_medsam2.sh` / `bash scripts/infer_nninteractive.sh` for single-model runs):
 ```bash
-.venv/bin/recist-benchmark \
+.venv-sam/bin/recist-benchmark \
   --input-dir "<INPUT_DIR>" \
   --output-dir runs/smoke_test \
   --device cpu \
@@ -133,7 +130,7 @@ Unless the user explicitly requested an unattended full run in Step 0, share the
 ### Step 7: Full Benchmark & Final Report
 Run without `--limit` to an explicit cohort `--output-dir` (via `recist-benchmark` for the full paper suite, or the per-model `.sh` script under `scripts/`):
 ```bash
-.venv/bin/recist-benchmark \
+.venv-sam/bin/recist-benchmark \
   --input-dir "<INPUT_DIR>" \
   --output-dir runs/benchmark_full \
   --device "<cpu|cuda>" \
@@ -171,4 +168,4 @@ Each `(model, case)` pair runs sequentially in an isolated Python subprocess (`r
 
 ### 3. Public Repo Hygiene
 - Never commit patient CT scans, real case identifiers, private manifests, model weights (`.pt`/`.pth`), `.npz`/`.nii.gz` files, outputs (`runs/`), secrets, or internal filesystem/cluster paths.
-- Before pushing any code or skill changes, run `.venv/bin/pytest -v`, `python -m compileall -q src tests`, and a repository grep check for private paths or credentials.
+- Before pushing any code or skill changes, run `pytest -v` (in `.venv-sam` or `.venv`), `python -m compileall -q src tests`, and a repository grep check for private paths or credentials.

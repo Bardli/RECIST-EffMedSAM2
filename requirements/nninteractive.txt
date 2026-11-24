@@ -1,7 +1,7 @@
 -r core.txt
-# Install PyTorch for your hardware (CPU-only or CUDA wheel) before or alongside this file:
-#   CPU-only: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-#   CUDA:     pip install torch torchvision
+# Install PyTorch for your hardware before or alongside this file using uv:
+#   CPU-only: uv pip install --python .venv-nn/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   CUDA:     uv pip install --python .venv-nn/bin/python torch torchvision
 nnInteractive>=2.0.0
 nnunetv2>=2.5.0
 SimpleITK>=2.4.0

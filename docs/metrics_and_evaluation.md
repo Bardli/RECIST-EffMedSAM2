@@ -77,7 +77,8 @@ recist-eval --run-dir runs/benchmark --verify-from-npz --gpu-tolerance-mb 4096
 Offline unit and end-to-end synthetic tests validate phase breakdown math (`runtime_s = model_load_s + inference_s + postprocess_s`), in-profiler postprocessing, exception and `SIGKILL` failure resource capture, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), non-0 `CUDA_VISIBLE_DEVICES` -> physical GPU resolution, independent-instance storage, prompt geometry, and CSV generation:
 
 ```bash
-pytest -v
+uv pip install --python .venv-sam/bin/python pytest
+.venv-sam/bin/pytest -v
 ```
 
 ### Real GPU cold-start acceptance test
@@ -85,7 +86,7 @@ pytest -v
 From the checkout, install `pytest` in `.venv-sam` and run on an allocated GPU (for example, physical GPU 2):
 
 ```bash
-.venv-sam/bin/python -m pip install pytest
+uv pip install --python .venv-sam/bin/python pytest
 CUDA_VISIBLE_DEVICES=2 RECIST_REQUIRE_CUDA=1 .venv-sam/bin/python -m pytest -q -s tests/test_cuda_cold_start.py
 ```
 

@@ -15,6 +15,8 @@ A clean, standalone inference and efficiency-benchmarking suite for **3D CT lesi
 
 Both `requirements/sam.txt` and `requirements/nninteractive.txt` already include the core runner, profiler, and evaluator dependencies (`requirements/core.txt`), so no separate base environment is required.
 
+We use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`uv venv` + `uv pip`) for fast environment setup and automatic Python 3.11 management *(standard `python3 -m venv` + `pip` remains compatible with all `requirements/*.txt` files on offline/HPC systems without `uv`)*.
+
 First clone the repository:
 
 ```bash
@@ -28,40 +30,34 @@ cd RECIST-EffMedSAM2
 ##### Option A — SAM / RECIST-EffMedSAM2 environment (`.venv-sam`)
 
 ```bash
-python3 -m venv .venv-sam
-source .venv-sam/bin/activate
-pip install --upgrade pip
+uv venv --python 3.11 .venv-sam
 
 # CPU-only:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements/sam.txt
+uv pip install --python .venv-sam/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv-sam/bin/python -r requirements/sam.txt
 # Editable install preserves upstream EfficientTAM Hydra configs:
 git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
 git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
-SAM2_BUILD_CUDA=0 pip install --no-build-isolation -e .venv-sam/src/MedSAM2
+SAM2_BUILD_CUDA=0 uv pip install --python .venv-sam/bin/python --no-build-isolation -e .venv-sam/src/MedSAM2
 
-# Or on CUDA GPU (after installing CUDA PyTorch from pytorch.org):
-# pip install -r requirements/sam.txt
+# Or on CUDA GPU (after installing CUDA PyTorch from pytorch.org via `uv pip install`):
+# uv pip install --python .venv-sam/bin/python -r requirements/sam.txt
 # git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
 # git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
-# pip install --no-build-isolation -e .venv-sam/src/MedSAM2
+# uv pip install --python .venv-sam/bin/python --no-build-isolation -e .venv-sam/src/MedSAM2
 
-pip install -e . --no-deps
-deactivate
+uv pip install --python .venv-sam/bin/python -e . --no-deps
 ```
 
 ##### Option B — nnInteractive environment (`.venv-nn`)
 
 ```bash
-python3 -m venv .venv-nn
-source .venv-nn/bin/activate
-pip install --upgrade pip
+uv venv --python 3.11 .venv-nn
 
 # Use --index-url https://download.pytorch.org/whl/cpu for CPU-only, or your CUDA wheel for GPU:
-pip install torch torchvision
-pip install -r requirements/nninteractive.txt
-pip install -e . --no-deps
-deactivate
+uv pip install --python .venv-nn/bin/python torch torchvision
+uv pip install --python .venv-nn/bin/python -r requirements/nninteractive.txt
+uv pip install --python .venv-nn/bin/python -e . --no-deps
 ```
 
 ---
