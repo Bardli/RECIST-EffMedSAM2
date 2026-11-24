@@ -24,18 +24,18 @@ Clean, standalone inference and efficiency-benchmarking suite for 3D CT lesion s
 
 ## One-Click Reproduction with an AI Agent
 
-This repository ships with a built-in reproduction skill ([`.agents/skills/reproduce-recist-benchmark/SKILL.md`](.agents/skills/reproduce-recist-benchmark/SKILL.md), mirrored at [`.claude/skills/reproduce-recist-benchmark/SKILL.md`](.claude/skills/reproduce-recist-benchmark/SKILL.md) and referenced by [`AGENTS.md`](AGENTS.md)) for **Antigravity, Claude Code, Codex, and Cursor**:
+This repository ships with a standalone agent reproduction guide at [`SKILL.md`](SKILL.md):
 
 ```bash
 git clone https://github.com/Bardli/RECIST-EffMedSAM2.git
 cd RECIST-EffMedSAM2
 ```
 
-Open the cloned directory in your coding agent and give it a single instruction, for example:
+Open the cloned directory in your AI coding agent and give it a single instruction, for example:
 
-> Use the `reproduce-recist-benchmark` skill to create `.venv` / `.venv-sam` / `.venv-nn`, run `pytest -v`, download & verify checkpoints, validate the raw-HU NPZs under `/path/to/data`, run a 1-case CPU smoke test, and audit `case_metrics.csv` before running the full cohort.
+> Follow `SKILL.md` to create `.venv` / `.venv-sam` / `.venv-nn`, run `pytest -v`, download & verify checkpoints, validate the raw-HU NPZs under `/path/to/data`, run a 1-case CPU smoke test, and audit `case_metrics.csv` before running the full cohort.
 
-The skill enforces the benchmark's exact model-loading policy (fresh per-case reload, in-profiler postprocessing, `--num-threads 1`), direct raw-HU handling, CPU/GPU NVML sanity checks, and CSV audit gates automatically.
+`SKILL.md` enforces the benchmark's exact model-loading policy (fresh per-case reload, in-profiler postprocessing, `--num-threads 1`), direct raw-HU handling, CPU/GPU NVML sanity checks, and CSV audit gates automatically.
 
 ---
 
