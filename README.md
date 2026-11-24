@@ -225,3 +225,20 @@ For performance/resource metric definitions, output CSV schemas, `recist-eval`, 
 | **nnInteractive-point** | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
 | **nnInteractive-scribble** | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
 | EfficientMedSAM2-Small (Small m8, ep40) | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
+
+### Real GPU cold-start acceptance test
+
+From the checkout, install pytest in the SAM environment and run the test on an
+allocated GPU. For example, on a workstation with physical GPU 2 available:
+
+```bash
+.venv-sam/bin/python -m pip install pytest
+CUDA_VISIBLE_DEVICES=2 RECIST_REQUIRE_CUDA=1 .venv-sam/bin/python -m pytest -q -s tests/test_cuda_cold_start.py
+```
+
+On a scheduler-managed node, keep its assigned `CUDA_VISIBLE_DEVICES` instead.
+The test starts a fresh Python interpreter, checks that the CPU path leaves CUDA
+uninitialized, then resets real CUDA peak counters and verifies a real tensor
+allocation. Without `RECIST_REQUIRE_CUDA=1`, GPU-less test environments skip
+this test; with it, absent hardware or a missing CUDA-enabled PyTorch fails.
+This allocator test does not replace a one-case run with real model weights.

@@ -22,6 +22,7 @@ import numpy as np
 from ..ct_inputs import nninteractive_image
 from ..postprocess import finalize_and_save_predictions
 from ..profiling.monitor import DEFAULT_GPU_TOLERANCE_MB, CaseProfiler, write_json_atomic
+from .device_memory import reset_cuda_peaks
 from ..profiling.report import plot_case
 from ..prompts import (
     MASK_MODES,
@@ -209,8 +210,7 @@ def run_case(
     torch_device = torch.device(
         device if device.startswith("cuda") or device == "cpu" else f"cuda:{device}"
     )
-    if torch_device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(torch_device)
+    reset_cuda_peaks(torch_device)
 
     input_path = Path(input_npz).resolve()
     case_id = input_path.stem
