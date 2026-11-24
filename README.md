@@ -52,8 +52,9 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements/sam.txt
-SAM2_BUILD_CUDA=0 pip install --no-build-isolation \
-  "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+SAM2_BUILD_CUDA=0 pip install --no-build-isolation -e .venv-sam/src/MedSAM2
 pip install -e . --no-deps
 ```
 
@@ -64,8 +65,9 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision
 pip install -r requirements/sam.txt
-pip install --no-build-isolation \
-  "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+pip install --no-build-isolation -e .venv-sam/src/MedSAM2
 pip install -e . --no-deps
 ```
 

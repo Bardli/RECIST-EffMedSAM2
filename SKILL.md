@@ -51,8 +51,9 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family.
      .venv-sam/bin/pip install --upgrade pip
      .venv-sam/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
      .venv-sam/bin/pip install -r requirements/sam.txt
-     SAM2_BUILD_CUDA=0 .venv-sam/bin/pip install --no-build-isolation \
-       "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+     git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+     SAM2_BUILD_CUDA=0 .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
      .venv-sam/bin/pip install -e . --no-deps
      ```
    - **CUDA GPU:**
@@ -61,8 +62,9 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family.
      .venv-sam/bin/pip install --upgrade pip
      .venv-sam/bin/pip install torch torchvision
      .venv-sam/bin/pip install -r requirements/sam.txt
-     .venv-sam/bin/pip install --no-build-isolation \
-       "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+     git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+     .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
      .venv-sam/bin/pip install -e . --no-deps
      ```
 
