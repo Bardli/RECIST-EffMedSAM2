@@ -1,0 +1,97 @@
+[
+  {
+    "name": "efftiny_m8_ep40_box",
+    "display_name": "RECIST-EffMedSAM2 (Tiny m8, epoch 40)",
+    "family": "sam",
+    "paper_default": true,
+    "backend": "eff",
+    "model_size": "tiny",
+    "prompt": "box",
+    "cfg_package": "efficient_track_anything",
+    "cfg_relpath": "configs/efficienttam_ti_512x512.yaml",
+    "checkpoint_relpath": "RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt",
+    "checkpoint_sha256": {
+      "RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt": "0b377887f5587cbfd42dbc739a1711f30db276f3fd4c849233df2142ee4f5f5d"
+    },
+    "disable_image_encoder_compile": true
+  },
+  {
+    "name": "medsam2_box",
+    "display_name": "MedSAM2 (FLARE25 RECIST baseline)",
+    "family": "sam",
+    "paper_default": true,
+    "backend": "medsam2",
+    "model_size": "small",
+    "prompt": "box",
+    "cfg_package": "sam2",
+    "cfg_relpath": "configs/sam2.1_hiera_t512.yaml",
+    "checkpoint_relpath": "MedSAM2-RECIST/checkpoints/medsam2_FLARE25_RECIST_baseline.pt",
+    "checkpoint_sha256": {
+      "MedSAM2-RECIST/checkpoints/medsam2_FLARE25_RECIST_baseline.pt": "890e6e10924984c7b704a1984362c53a56dc0ee27c796a34eb49c83a1dc4a144"
+    },
+    "disable_image_encoder_compile": true
+  },
+  {
+    "name": "nninteractive_box_hu",
+    "display_name": "nnInteractive-box",
+    "family": "nninteractive",
+    "paper_default": true,
+    "prompt_mode": "box",
+    "interaction": "batch",
+    "checkpoint_relpath": "nninteractive_hf_models/models/nnInteractive_v1.0",
+    "checkpoint_sha256": {
+      "nninteractive_hf_models/models/nnInteractive_v1.0/fold_0/checkpoint_final.pth": "b3ac4421f85457bbd1aa0d87f5e67bcb7bc8e2ce6b824b6ac45077cc5d630ea9",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/plans.json": "64a30a430438302a692a3edadd345a207b3428bea2e5cdc125298757da21f4d4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/dataset.json": "e090394ac539b2823b2135173658190245c462cb042d3442487e4829f08252c4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/inference_session_class.json": "8f43587a9d139fcf7af8776219e9432dab079f985cb0d7da72a4c851b39a4f09"
+    }
+  },
+  {
+    "name": "nninteractive_3pt_25_hu",
+    "display_name": "nnInteractive-point (3pt 25/50/75%)",
+    "family": "nninteractive",
+    "paper_default": true,
+    "prompt_mode": "3pt_25",
+    "interaction": "batch",
+    "checkpoint_relpath": "nninteractive_hf_models/models/nnInteractive_v1.0",
+    "checkpoint_sha256": {
+      "nninteractive_hf_models/models/nnInteractive_v1.0/fold_0/checkpoint_final.pth": "b3ac4421f85457bbd1aa0d87f5e67bcb7bc8e2ce6b824b6ac45077cc5d630ea9",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/plans.json": "64a30a430438302a692a3edadd345a207b3428bea2e5cdc125298757da21f4d4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/dataset.json": "e090394ac539b2823b2135173658190245c462cb042d3442487e4829f08252c4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/inference_session_class.json": "8f43587a9d139fcf7af8776219e9432dab079f985cb0d7da72a4c851b39a4f09"
+    }
+  },
+  {
+    "name": "nninteractive_line_skel_in3_hu",
+    "display_name": "nnInteractive-scribble (skeleton inset 3)",
+    "family": "nninteractive",
+    "paper_default": true,
+    "prompt_mode": "line",
+    "interaction": "batch",
+    "scribble_stroke": "skeleton",
+    "scribble_inset": 3.0,
+    "checkpoint_relpath": "nninteractive_hf_models/models/nnInteractive_v1.0",
+    "checkpoint_sha256": {
+      "nninteractive_hf_models/models/nnInteractive_v1.0/fold_0/checkpoint_final.pth": "b3ac4421f85457bbd1aa0d87f5e67bcb7bc8e2ce6b824b6ac45077cc5d630ea9",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/plans.json": "64a30a430438302a692a3edadd345a207b3428bea2e5cdc125298757da21f4d4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/dataset.json": "e090394ac539b2823b2135173658190245c462cb042d3442487e4829f08252c4",
+      "nninteractive_hf_models/models/nnInteractive_v1.0/inference_session_class.json": "8f43587a9d139fcf7af8776219e9432dab079f985cb0d7da72a4c851b39a4f09"
+    }
+  },
+  {
+    "name": "effsmall_m8_ep40_box",
+    "display_name": "EfficientMedSAM2-Small (Small m8, epoch 40, supplementary)",
+    "family": "sam",
+    "paper_default": false,
+    "backend": "eff",
+    "model_size": "small",
+    "prompt": "box",
+    "cfg_package": "efficient_track_anything",
+    "cfg_relpath": "configs/efficienttam_s_512x512.yaml",
+    "checkpoint_relpath": "RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt",
+    "checkpoint_sha256": {
+      "RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt": "423793cec97e9ec93b70c25fbff1c8267d1a1f58deed254b79e16caf7b489fb3"
+    },
+    "disable_image_encoder_compile": true
+  }
+]

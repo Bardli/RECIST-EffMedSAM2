@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recist-effmedsam2"
+version = "0.1.0"
+description = "Clean CPU/GPU inference and FLARE-style efficiency benchmarking for RECIST-to-3D CT lesion segmentation"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "psutil>=5.9",
+    "nvidia-ml-py>=12.0",
+    "matplotlib>=3.7",
+    "opencv-python-headless>=4.8",
+    "scikit-image>=0.21",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+recist-benchmark = "recist_effmedsam2.runner.run_benchmark:main"
+recist-eval = "recist_effmedsam2.evaluation.compute_metrics:main"
+recist-sam-infer = "recist_effmedsam2.backends.sam_infer:main"
+recist-nninteractive-infer = "recist_effmedsam2.backends.nninteractive_infer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

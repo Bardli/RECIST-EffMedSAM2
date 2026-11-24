@@ -1,0 +1,10 @@
+# Core dependencies for profiling, prompt generation, storage, runner, and evaluation
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+psutil>=5.9
+nvidia-ml-py>=12.0
+matplotlib>=3.7
+opencv-python-headless>=4.8
+scikit-image>=0.21
+Pillow>=10.0
