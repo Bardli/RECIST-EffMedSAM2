@@ -3,7 +3,7 @@ name: reproduce-recist-benchmark
 description: >-
   End-to-end one-click reproduction runbook and strict execution policy for
   RECIST-EffMedSAM2. Use when an agent is asked to set up environments, download
-  and verify weights, validate raw-HU CT NPZs, run a 1-case smoke test or full
+  and verify weights, validate HU and normalized/windowed CT NPZs, run a 1-case smoke test or full
   CPU/GPU efficiency benchmark, audit reports CSVs, or modify runner/profiler/backend code.
 ---
 
@@ -77,7 +77,7 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family.
    ```
 
 ### Step 3: Offline Self-Test
-Verify the runner, FLARE-style profiler, direct raw-HU loader, independent-instance storage, and evaluator before running real checkpoints:
+Verify the runner, FLARE-style profiler, CT input loader, independent-instance storage, and evaluator before running real checkpoints:
 ```bash
 .venv/bin/pytest -v
 ```
@@ -92,11 +92,13 @@ Check whether `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and `asse
 - If a checkpoint is missing, **stop and inform the user**: either obtain its path / copy it into `assets/`, or omit that model via `--models` until supplied.
 - Always pass `--verify-sha256` on benchmark runs so every asset hash in `configs/models.json` / `configs/weights.sha256` is strictly enforced.
 
-### Step 5: Validate Input NPZs (Direct Raw HU)
+### Step 5: Validate Input NPZs (HU & Normalized/Windowed Channels)
 Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to confirm keys, shape, dtype, and `ct_inputs.py` compatibility:
 - Expected arrays: `imgs` `(Z, Y, X)`, `recist` integer `(Z, Y, X)`, `spacing` `(3,)` `[sx, sy, sz]` in mm, and optional `gts` (or `gts_hidden`).
-- Confirm `imgs` stores raw CT Hounsfield Units directly (`int16`/`int32`/`float32`/`float64`, **no** `hu_slope`/`hu_intercept` reconstruction needed), or provide separate `uint8` SAM twins via `--window-dir` / `data/window_twins/`.
-- Verify with `nninteractive_image(data, require_raw=True)` and `abdomen_image(data, require_raw=...)` in `.venv/bin/python` on a single header/case check. Pass `--require-raw-hu` on `recist-benchmark` whenever raw HU inputs are expected (mandatory for valid `nninteractive_*` paper runs).
+- Both dataset channels are supported in `src/recist_effmedsam2/ct_inputs.py`:
+  - **HU channel:** `intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept` (decoded to float64 HU by `raw_hu()`/`nninteractive_image()`, and windowed L40/W400 by `abdomen_image()`), or unencoded raw `imgs` passed through by `nninteractive_image(..., require_raw=False)`.
+  - **Normalized / pre-windowed channel (`uint8` in `[0, 255]`):** accepted directly by `abdomen_image(..., require_raw=False)` (and `nninteractive_image(..., require_raw=False)`), or supplied alongside HU inputs via `data/window_twins/` / `--window-dir`.
+- Pass `--require-raw-hu` on `recist-benchmark` only when strictly enforcing `nifti_stored_scaled_v1` HU decoding and rejecting pre-windowed `uint8` inputs.
 
 ### Step 6: Run 1-Case Smoke Test & Audit Telemetry
 Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots`:
@@ -156,13 +158,13 @@ Each `(model, case)` pair runs sequentially in an isolated Python subprocess (`r
 5. **Failure & OOM telemetry:** Both the worker (`try ... except BaseException`) and an external parent `ProcessTreeMonitor` capture RAM/CPU/GPU samples and write atomic JSON receipts. Stale `<case>.metrics.json` is cleared before worker launch so a crashed or `SIGKILL`/OOM-killed worker can never leave behind an earlier `ok` receipt.
 6. **GPU monitoring status semantics:** Never conflate unmeasured/failed NVML queries (`None` -> blank CSV cell; `gpu_monitor_status` in `{"unavailable", "query_failed", "partial"}`) with a verified `0.0 MiB` measurement (`gpu_monitor_status == "measured"`).
 
-### 2. Direct Raw-HU Input Convention
-`src/recist_effmedsam2/ct_inputs.py` reads raw Hounsfield Units **directly** from original CT NPZs without slope/intercept reconstruction:
-- **Direct raw HU (primary path):** NPZ `imgs` is a 3D signed-integer (`int16`/`int32`) or floating-point (`float32`/`float64`) array storing raw CT HU directly, with no `intensity_encoding`, `hu_slope`, or `hu_intercept` keys.
-  - `nninteractive_image()` passes raw HU through unmodified.
-  - `abdomen_image()` windows raw HU directly to L40/W400 (`[-160, 240]` -> `uint8 [0, 255]`) at input load time unless a separate pre-windowed `uint8` twin is supplied via `--window-dir` / `data/window_twins/`.
-- **Legacy compatibility:** NPZs explicitly carrying `intensity_encoding="nifti_stored_scaled_v1"` with valid `hu_slope`/`hu_intercept` remain supported if encountered.
-- **Strict mode (`--require-raw-hu`):** Rejects pre-windowed `uint8` inputs while accepting direct raw HU (`int16`/`float32`) natively.
+### 2. Input Channels: HU & Normalized/Windowed
+`src/recist_effmedsam2/ct_inputs.py` keeps both the HU channel and the normalized/pre-windowed channel open:
+- **HU channel:**
+  - `nifti_stored_scaled_v1` (`intensity_encoding`, `hu_slope`, `hu_intercept`): `raw_hu()` and `nninteractive_image()` reconstruct float64 HU; `abdomen_image()` windows HU to L40/W400 (`[-160, 240]` -> `uint8 [0, 255]`).
+  - Direct/unencoded `imgs`: `nninteractive_image(..., require_raw=False)` passes `data["imgs"]` through (e.g., direct `int16` HU paired with `--window-dir`).
+- **Normalized / pre-windowed channel (`uint8` `[0, 255]`):** accepted directly by `abdomen_image(..., require_raw=False)` and `nninteractive_image(..., require_raw=False)`, or supplied separately for SAM via `data/window_twins/` / `--window-dir`.
+- **Strict mode (`--require-raw-hu`):** enforces `nifti_stored_scaled_v1` HU decoding and rejects pre-windowed `uint8` inputs.
 
 ### 3. Public Repo Hygiene
 - Never commit patient CT scans, real case identifiers, private manifests, model weights (`.pt`/`.pth`), `.npz`/`.nii.gz` files, outputs (`runs/`), secrets, or internal filesystem/cluster paths.

@@ -33,9 +33,9 @@ cd RECIST-EffMedSAM2
 
 Open the cloned directory in your AI coding agent and give it a single instruction, for example:
 
-> Follow `SKILL.md` to create `.venv` / `.venv-sam` / `.venv-nn`, run `pytest -v`, download & verify checkpoints, validate the raw-HU NPZs under `/path/to/data`, run a 1-case CPU smoke test, and audit `case_metrics.csv` before running the full cohort.
+> Follow `SKILL.md` to create `.venv` / `.venv-sam` / `.venv-nn`, run `pytest -v`, download & verify checkpoints, validate the input NPZs under `/path/to/data`, run a 1-case CPU smoke test, and audit `case_metrics.csv` before running the full cohort.
 
-`SKILL.md` enforces the benchmark's exact model-loading policy (fresh per-case reload, in-profiler postprocessing, `--num-threads 1`), direct raw-HU handling, CPU/GPU NVML sanity checks, and CSV audit gates automatically.
+`SKILL.md` enforces the benchmark's exact model-loading policy (fresh per-case reload, in-profiler postprocessing, `--num-threads 1`), HU & normalized/windowed input handling, CPU/GPU NVML sanity checks, and CSV audit gates automatically.
 
 ---
 
@@ -138,9 +138,8 @@ Place `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` into `assets/` and pass `
 Each input `.npz` file represents one 3D CT case with arrays in `(Z, Y, X)` voxel order and `(X, Y, Z)` physical spacing:
 
 - `imgs`:
-  - **Raw HU (default):** 3D signed-integer (`int16` / `int32`) or floating-point (`float32` / `float64`) array storing raw CT Hounsfield Units directly from the original CT volume, with **no** `hu_slope`/`hu_intercept` reconstruction. `nnInteractive` uses the raw HU values directly; SAM/EfficientMedSAM2 applies L40/W400 windowing (`[-160, 240]` -> `uint8 [0, 255]`) in `ct_inputs.py` unless pre-windowed twins are provided.
-  - **Pre-windowed SAM input (`uint8`):** 3D `uint8` array in `[0, 255]`. If SAM models should use separate pre-windowed volumes while `nnInteractive` reads raw HU, place twins in `data/window_twins/` (auto-detected) or pass `--window-dir /path/to/windowed_npz`.
-  - *(Legacy compatibility: archives explicitly carrying `intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept` remain optionally supported.)*
+  - **HU channel (`nifti_stored_scaled_v1` or raw HU for `nnInteractive`):** stored CT array accompanied by `intensity_encoding="nifti_stored_scaled_v1"`, `hu_slope`, and `hu_intercept` (`ct_inputs.py` reconstructs float64 HU for `nnInteractive` and windows to L40/W400 `[-160, 240]` -> `uint8 [0, 255]` at the SAM model boundary); raw unencoded `imgs` also passes through to `nnInteractive` when `--require-raw-hu` is omitted.
+  - **Normalized / pre-windowed channel (`uint8`):** 3D `uint8` array in `[0, 255]`. Supported directly for SAM (and `nnInteractive` when `--require-raw-hu` is omitted), or paired via `data/window_twins/` (auto-detected) / `--window-dir /path/to/windowed_npz` so SAM reads pre-windowed/normalized volumes while `nnInteractive` reads HU volumes.
 - `recist`: integer `(Z, Y, X)` label array with non-zero lesion IDs drawn on each lesion's axial RECIST slice.
 - `spacing`: float `(3,)` physical spacing `[sx, sy, sz]` in mm.
 - `gts` (or `gts_hidden`, optional): integer `(Z, Y, X)` ground-truth mask for Dice/volume evaluation (never used as a prompt source for RECIST modes).
@@ -239,8 +238,8 @@ Every case execution runs an embedded `CaseProfiler` (and parent `ProcessTreeMon
 | `inference_s` | **Yes** | Pure model inference across prompted lesions (state init/reset, prompt application, forward/reverse propagation or AutoZoom); **excludes** NPZ loading/decompression, preprocessing, and output saving |
 | `postprocess_s` | **Yes** | Optional postprocessing (`moving_centroid`, inside `CaseProfiler`; `0.0` when `none`) |
 | `runtime_s` | **Total** | `model_load_s + inference_s + postprocess_s` |
-| `data_load_s` | No (audited separately) | NPZ disk load, decompression, and raw-HU / L40-W400 input loading |
-| `preprocess_s` | No (audited separately) | SAM RGB resize & ImageNet normalization, or nnInteractive `set_image` preprocessing |
+| `data_load_s` | No (audited separately) | NPZ disk load & decompression |
+| `preprocess_s` | No (audited separately) | HU decoding / L40-W400 windowing / RGB resize & normalization, or nnInteractive `set_image` preprocessing |
 | `save_s` | No (audited separately) | Streamed independent-instance compressed NPZ write (raw + postprocessed) & CRC check |
 | `wall_total_s` | No (audited separately) | Complete end-to-end case worker wall-clock time across all phases |
 

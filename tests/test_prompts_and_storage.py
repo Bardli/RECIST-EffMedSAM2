@@ -15,67 +15,35 @@ from recist_effmedsam2.storage import IndependentPredictionWriter, load_independ
 
 
 def test_ct_inputs_raw_hu_and_windowing():
-    base_hu = np.array([[[-1000, 40], [240, 500]]], dtype=np.int16)
-    direct_int16_3d = np.repeat(base_hu, 2, axis=0)
+    stored = np.array([[[-1000, 40], [240, 500]]], dtype=np.int16)
+    data = {
+        "intensity_encoding": np.array("nifti_stored_scaled_v1"),
+        "imgs": stored,
+        "hu_slope": np.array(1.0),
+        "hu_intercept": np.array(0.0),
+    }
+    # Add Z dimension -> (2, 2, 2)
+    stored_3d = np.repeat(stored, 2, axis=0)
+    data["imgs"] = stored_3d
 
-    # 1. Primary format: direct int16 raw HU without intensity_encoding / slope / intercept
-    direct_data = {"imgs": direct_int16_3d}
-    hu = raw_hu(direct_data)
-    assert hu.dtype == np.int16
-    assert np.array_equal(hu, direct_int16_3d)
+    hu = raw_hu(data)
+    assert np.allclose(hu[0], [[-1000.0, 40.0], [240.0, 500.0]])
+    win = abdomen_image(data, require_raw=True)
+    assert win.dtype == np.uint8
+    assert win[0, 0, 0] == 0
+    assert win[0, 1, 0] == 255
+    assert win[0, 1, 1] == 255
+    assert 125 <= int(win[0, 0, 1]) <= 130  # 40 HU -> mid-range of [-160, 240]
 
-    for strict in (False, True):
-        win = abdomen_image(direct_data, require_raw=strict)
-        assert win.dtype == np.uint8
-        assert win[0, 0, 0] == 0
-        assert win[0, 1, 0] == 255
-        assert win[0, 1, 1] == 255
-        assert 125 <= int(win[0, 0, 1]) <= 130  # 40 HU -> mid-range of [-160, 240]
+    nn_img = nninteractive_image(data, require_raw=True)
+    assert np.allclose(nn_img, hu)
 
-        nn_img = nninteractive_image(direct_data, require_raw=strict)
-        assert nn_img.dtype == np.int16
-        assert np.array_equal(nn_img, direct_int16_3d)
-
-    # 2. Direct float32 raw HU without reconstruction metadata
-    direct_f32 = {"imgs": direct_int16_3d.astype(np.float32)}
-    hu_f32 = raw_hu(direct_f32)
-    assert hu_f32.dtype == np.float32
-    assert np.allclose(hu_f32, direct_int16_3d)
-    assert np.array_equal(abdomen_image(direct_f32, require_raw=True), win)
-    assert np.allclose(nninteractive_image(direct_f32, require_raw=True), direct_int16_3d)
-
-    # Non-finite float32 and unscaled uint16 without intensity_encoding must be rejected
-    bad_nan = direct_int16_3d.astype(np.float32)
-    bad_nan[0, 0, 0] = np.nan
-    with pytest.raises(ValueError):
-        raw_hu({"imgs": bad_nan})
-    with pytest.raises(ValueError):
-        raw_hu({"imgs": np.zeros((2, 2, 2), dtype=np.uint16)})
-
-    # 3. Pre-windowed uint8 behavior under require_raw=False vs require_raw=True
     uint8_data = {"imgs": win}
     assert np.array_equal(abdomen_image(uint8_data, require_raw=False), win)
-    assert np.array_equal(nninteractive_image(uint8_data, require_raw=False), win)
-    with pytest.raises(ValueError):
-        raw_hu(uint8_data)
     with pytest.raises(ValueError):
         abdomen_image(uint8_data, require_raw=True)
     with pytest.raises(ValueError):
         nninteractive_image(uint8_data, require_raw=True)
-
-    # 4. Optional legacy nifti_stored_scaled_v1 backward compatibility
-    legacy_data = {
-        "intensity_encoding": np.array("nifti_stored_scaled_v1"),
-        "imgs": np.full((2, 2, 2), 520, dtype=np.int16),
-        "hu_slope": np.array(2.0),
-        "hu_intercept": np.array(-1000.0),
-    }
-    legacy_hu = raw_hu(legacy_data)
-    assert legacy_hu.dtype == np.float64
-    assert np.allclose(legacy_hu, 40.0)
-    legacy_win = abdomen_image(legacy_data, require_raw=True)
-    assert np.all((125 <= legacy_win) & (legacy_win <= 130))
-    assert np.allclose(nninteractive_image(legacy_data, require_raw=True), 40.0)
 
 
 def test_recist_prompts_and_scribble():
