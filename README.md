@@ -52,8 +52,9 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements/sam.txt
-SAM2_BUILD_CUDA=0 pip install --no-build-isolation \
-  "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+SAM2_BUILD_CUDA=0 pip install --no-build-isolation -e .venv-sam/src/MedSAM2
 pip install -e . --no-deps
 ```
 
@@ -64,8 +65,9 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision
 pip install -r requirements/sam.txt
-pip install --no-build-isolation \
-  "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
+git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+pip install --no-build-isolation -e .venv-sam/src/MedSAM2
 pip install -e . --no-deps
 ```
 
@@ -225,3 +227,20 @@ For performance/resource metric definitions, output CSV schemas, `recist-eval`, 
 | **nnInteractive-point** | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
 | **nnInteractive-scribble** | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
 | EfficientMedSAM2-Small (Small m8, ep40) | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
+
+### Real GPU cold-start acceptance test
+
+From the checkout, install pytest in the SAM environment and run the test on an
+allocated GPU. For example, on a workstation with physical GPU 2 available:
+
+```bash
+.venv-sam/bin/python -m pip install pytest
+CUDA_VISIBLE_DEVICES=2 RECIST_REQUIRE_CUDA=1 .venv-sam/bin/python -m pytest -q -s tests/test_cuda_cold_start.py
+```
+
+On a scheduler-managed node, keep its assigned `CUDA_VISIBLE_DEVICES` instead.
+The test starts a fresh Python interpreter, checks that the CPU path leaves CUDA
+uninitialized, then resets real CUDA peak counters and verifies a real tensor
+allocation. Without `RECIST_REQUIRE_CUDA=1`, GPU-less test environments skip
+this test; with it, absent hardware or a missing CUDA-enabled PyTorch fails.
+This allocator test does not replace a one-case run with real model weights.
