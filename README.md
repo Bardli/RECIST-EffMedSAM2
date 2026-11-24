@@ -22,20 +22,6 @@ Clean, standalone inference and efficiency-benchmarking suite for 3D CT lesion s
 
 ---
 
-## Execution & Model-Loading Policy
-
-Each `(model, case)` pair runs sequentially in an isolated Python subprocess (`recist_effmedsam2.runner.run_case`):
-
-1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case run and are counted in `runtime_s` (`runtime_s = model_load_s + inference_s + postprocess_s`). This reflects single-scan clinical deployment and prevents cross-case memory/allocator state from distorting peak RAM or VRAM measurements.
-2. **Postprocessing inside profiler scope:** When `--postprocess moving_centroid` is enabled, clipping and postprocessed NPZ saving + scoring execute inside the active `CaseProfiler` window so `postprocess_s`, `runtime_s`, `wall_total_s`, and `MaxRAM_MB` capture the complete workflow.
-3. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to stabilize CPU measurements and keep host RAM bounded. Override via `--num-threads N`.
-4. **Strict CPU isolation & physical GPU mapping:**
-   - `--device cpu`: forces `CUDA_VISIBLE_DEVICES=""` and `NVIDIA_VISIBLE_DEVICES="void"` prior to Python startup and asserts `torch.cuda.is_available() == False`, while querying **all** physical GPUs via NVML to verify zero hardware VRAM usage.
-   - `--device cuda --gpu-index N`: sets `CUDA_VISIBLE_DEVICES=N` (logical `cuda:0` inside the worker) and passes physical index `N` explicitly to NVML so VRAM sampling monitors physical card `N` rather than defaulting to GPU `0`.
-5. **Failure & OOM telemetry:** Both the worker (`try ... except BaseException`) and an external parent `ProcessTreeMonitor` capture RAM/CPU/GPU samples and write atomic JSON receipts. Even if a worker is killed by `SIGKILL` / Linux OOM killer, `case_metrics.csv` preserves `status=failed(...)`, `wall_total_s`, and observed peak RAM/GPU usage without leaving stale `ok` receipts.
-
----
-
 ## Installation
 
 SAM/EfficientTAM and nnInteractive can share one environment (if dependencies are compatible) or live in the default two virtual environments (`.venv-sam` and `.venv-nn`, auto-detected by `recist-benchmark`).
@@ -74,7 +60,7 @@ source .venv-sam/bin/activate
 pip install --upgrade pip
 pip install torch torchvision
 pip install -r requirements/sam.txt
-pip install -no-build-isolation \
+pip install --no-build-isolation \
   "git+https://github.com/Bardli/MedSAM2.git@333419e40353e55f4e4b191cb6cd3a238bd0b180"
 pip install -e . --no-deps
 ```
@@ -135,8 +121,9 @@ Place `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` into `assets/` and pass `
 Each input `.npz` file represents one 3D CT case with arrays in `(Z, Y, X)` voxel order and `(X, Y, Z)` physical spacing:
 
 - `imgs`:
-  - **Raw HU (`nifti_stored_scaled_v1`):** stored CT array accompanied by `intensity_encoding="nifti_stored_scaled_v1"`, `hu_slope`, and `hu_intercept`. `ct_inputs.py` reconstructs float64 HU for nnInteractive and windows to L40/W400 (`[-160, 240]` -> `uint8 [0, 255]`) at the SAM model boundary.
-  - **Pre-windowed SAM input:** `uint8` 3D array in `[0, 255]`. If SAM models require a separate pre-windowed directory while nnInteractive reads raw HU, place twins in `data/window_twins/` (auto-detected) or pass `--window-dir /path/to/windowed_npz`.
+  - **Raw HU (default):** 3D signed-integer (`int16` / `int32`) or floating-point (`float32` / `float64`) array storing raw CT Hounsfield Units directly from the original CT volume, with **no** `hu_slope`/`hu_intercept` reconstruction. `nnInteractive` uses the raw HU values directly; SAM/EfficientMedSAM2 applies L40/W400 windowing (`[-160, 240]` -> `uint8 [0, 255]`) in `ct_inputs.py` unless pre-windowed twins are provided.
+  - **Pre-windowed SAM input (`uint8`):** 3D `uint8` array in `[0, 255]`. If SAM models should use separate pre-windowed volumes while `nnInteractive` reads raw HU, place twins in `data/window_twins/` (auto-detected) or pass `--window-dir /path/to/windowed_npz`.
+  - *(Legacy compatibility: archives explicitly carrying `intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept` remain optionally supported.)*
 - `recist`: integer `(Z, Y, X)` label array with non-zero lesion IDs drawn on each lesion's axial RECIST slice.
 - `spacing`: float `(3,)` physical spacing `[sx, sy, sz]` in mm.
 - `gts` (or `gts_hidden`, optional): integer `(Z, Y, X)` ground-truth mask for Dice/volume evaluation (never used as a prompt source for RECIST modes).
@@ -235,8 +222,8 @@ Every case execution runs an embedded `CaseProfiler` (and parent `ProcessTreeMon
 | `inference_s` | **Yes** | Pure model inference across prompted lesions (state init/reset, prompt application, forward/reverse propagation or AutoZoom); **excludes** NPZ loading/decompression, preprocessing, and output saving |
 | `postprocess_s` | **Yes** | Optional postprocessing (`moving_centroid`, inside `CaseProfiler`; `0.0` when `none`) |
 | `runtime_s` | **Total** | `model_load_s + inference_s + postprocess_s` |
-| `data_load_s` | No (audited separately) | NPZ disk load & decompression |
-| `preprocess_s` | No (audited separately) | HU decoding / L40-W400 windowing / RGB resize & normalization, or nnInteractive `set_image` preprocessing |
+| `data_load_s` | No (audited separately) | NPZ disk load, decompression, and raw-HU / L40-W400 input loading |
+| `preprocess_s` | No (audited separately) | SAM RGB resize & ImageNet normalization, or nnInteractive `set_image` preprocessing |
 | `save_s` | No (audited separately) | Streamed independent-instance compressed NPZ write (raw + postprocessed) & CRC check |
 | `wall_total_s` | No (audited separately) | Complete end-to-end case worker wall-clock time across all phases |
 

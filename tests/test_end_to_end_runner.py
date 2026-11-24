@@ -34,15 +34,13 @@ def _make_synthetic_case(
     cv2.line(recist[3], (30, 34), (38, 34), 3, thickness=2)
 
     spacing = np.array([1.0, 1.0, 2.5], dtype=np.float32)
+    # Direct raw int16 HU without intensity_encoding / slope / intercept reconstruction
     np.savez_compressed(
         hu_path,
         imgs=hu,
         gts=gt,
         recist=recist,
         spacing=spacing,
-        intensity_encoding=np.array("nifti_stored_scaled_v1"),
-        hu_slope=np.array(1.0),
-        hu_intercept=np.array(0.0),
     )
     if win_path is not None:
         win = ((np.clip(hu.astype(np.float64), -160.0, 240.0) + 160.0) / 400.0 * 255.0).astype(
@@ -330,3 +328,55 @@ def test_non_zero_gpu_dispatch_and_default_layout(tmp_path: Path):
     assert all("CUDA_VISIBLE_DEVICES=2" in ln for ln in lines)
     assert all("--device cuda:0" in ln for ln in lines)
     assert all("--gpu-index 2" in ln for ln in lines)
+
+
+def test_direct_raw_hu_without_window_dir(tmp_path: Path):
+    """Both SAM and nnInteractive accept direct int16 raw-HU NPZs under --require-raw-hu without --window-dir."""
+    in_dir = tmp_path / "inputs"
+    in_dir.mkdir(parents=True)
+    case_path = in_dir / "raw_hu_case.npz"
+    _make_synthetic_case(case_path)  # direct int16 imgs, no intensity_encoding / slope / intercept
+
+    out_dir = tmp_path / "run_raw_hu"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "src")
+
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "recist_effmedsam2.runner.run_benchmark",
+            "--models-config",
+            str(repo_root / "configs" / "models.json"),
+            "--input-dir",
+            str(in_dir),
+            "--output-dir",
+            str(out_dir),
+            "--models",
+            "efftiny_m8_ep40_box",
+            "nninteractive_box_hu",
+            "--device",
+            "cpu",
+            "--num-threads",
+            "1",
+            "--require-raw-hu",
+            "--backend-override",
+            "mock",
+            "--sample-interval",
+            "0.02",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stdout + "\n" + res.stderr
+
+    with (out_dir / "reports" / "case_metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert {r["model"] for r in rows} == {"efftiny_m8_ep40_box", "nninteractive_box_hu"}
+    for r in rows:
+        assert r["status"] == "ok"
+        assert float(r["mean_dice"]) > 0.0
