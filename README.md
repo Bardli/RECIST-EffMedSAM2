@@ -1,246 +1,188 @@
 # RECIST-EffMedSAM2
 
-Clean, standalone inference and efficiency-benchmarking suite for 3D CT lesion segmentation from 2D RECIST annotations.
+A clean, standalone inference and efficiency-benchmarking suite for **3D CT lesion segmentation from 2D RECIST annotations** across **RECIST-EffMedSAM2**, **MedSAM2**, and **nnInteractive** — designed for effortless CPU/GPU reproduction in native Python without private containers.
 
-- **Unified CPU & GPU execution** via native Python (`--device cpu` or `--device cuda --gpu-index N`), without private Docker dependencies.
-- **Per-case model reload & serial single-threaded default** (`--num-threads 1`) matching single-scan clinical usage and minimizing peak RAM.
-- **Embedded FLARE-Efficiency resource profiling** (aligned with [`medfm-flare/FLARE-Efficiency`](https://github.com/medfm-flare/FLARE-Efficiency)) recording phase-level runtime breakdown (including postprocessing), process-tree RAM (`psutil` + `ru_maxrss`), PID-scoped GPU memory (`nvidia-ml-py` + PyTorch CUDA stats) mapped to the true physical GPU index, explicit `gpu_monitor_status` (`measured` vs `unavailable`/`query_failed`), and parent-side fallback monitoring so OOM/`SIGKILL`/crash runs still preserve resource telemetry.
-- **Independent-instance evaluation** (`independent_instances_v2`) scoring each prompted lesion channel without cross-lesion overlap overwriting or best-overlap rematching.
-
----
-
-## One-Click Reproduction with an AI Agent
-
-This repository ships with a standalone agent reproduction guide at [`SKILL.md`](SKILL.md):
-
-```bash
-git clone https://github.com/Bardli/RECIST-EffMedSAM2.git
-cd RECIST-EffMedSAM2
-```
-
-Open the cloned directory in your AI coding agent and give it a single instruction, for example:
-
-> Follow `SKILL.md` to create `.venv` / `.venv-sam` / `.venv-nn`, run `pytest -v`, download & verify checkpoints, validate the input NPZs under `/path/to/data`, run a 1-case CPU smoke test, and audit `case_metrics.csv` before running the full cohort.
-
-`SKILL.md` enforces the benchmark's exact model-loading policy (fresh per-case reload, in-profiler postprocessing, `--num-threads 1`), HU & normalized/windowed input handling, CPU/GPU NVML sanity checks, and CSV audit gates automatically.
+*Prefer letting an AI coding agent handle the setup?* Open the cloned folder in your agent and tell it to follow [`SKILL.md`](SKILL.md) — it will create the virtual environments, download and verify checkpoints, run a 1-case smoke test, and check the output CSVs for you.
 
 ---
 
 ## Installation
 
-SAM/EfficientTAM and nnInteractive can share one environment (if dependencies are compatible) or live in the default two virtual environments (`.venv-sam` and `.venv-nn`, auto-detected by `recist-benchmark`).
+**Install only what you need:**
 
-### 1. Core package (runner, profiler, prompt utilities, evaluator)
+- **`.venv-sam`** — for **RECIST-EffMedSAM2** and **MedSAM2**.
+- **`.venv-nn`** — for **nnInteractive** (`box`, `point`, and `scribble`).
+
+Both `requirements/sam.txt` and `requirements/nninteractive.txt` already include the core runner, profiler, and evaluator dependencies (`requirements/core.txt`), so no separate base environment is required.
+
+First clone the repository:
 
 ```bash
 git clone https://github.com/Bardli/RECIST-EffMedSAM2.git
 cd RECIST-EffMedSAM2
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements/core.txt
-pip install -e .
 ```
 
-### 2. SAM / EfficientMedSAM2 environment (`.venv-sam`, CPU or GPU)
+> [!NOTE]
+> For GPU environments, pick the PyTorch install command matching your CUDA driver on the [PyTorch homepage](https://pytorch.org/get-started/locally/) before installing the remaining packages below.
 
-**CPU-only:**
+##### Option A — SAM / RECIST-EffMedSAM2 environment (`.venv-sam`)
+
 ```bash
 python3 -m venv .venv-sam
 source .venv-sam/bin/activate
 pip install --upgrade pip
+
+# CPU-only:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements/sam.txt
+# Editable install preserves upstream EfficientTAM Hydra configs:
 git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
 git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
 SAM2_BUILD_CUDA=0 pip install --no-build-isolation -e .venv-sam/src/MedSAM2
+
+# Or on CUDA GPU (after installing CUDA PyTorch from pytorch.org):
+# pip install -r requirements/sam.txt
+# git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+# git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
+# pip install --no-build-isolation -e .venv-sam/src/MedSAM2
+
 pip install -e . --no-deps
+deactivate
 ```
 
-**CUDA GPU:**
-```bash
-python3 -m venv .venv-sam
-source .venv-sam/bin/activate
-pip install --upgrade pip
-pip install torch torchvision
-pip install -r requirements/sam.txt
-git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
-git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
-pip install --no-build-isolation -e .venv-sam/src/MedSAM2
-pip install -e . --no-deps
-```
-
-### 3. nnInteractive environment (`.venv-nn`, CPU or GPU)
+##### Option B — nnInteractive environment (`.venv-nn`)
 
 ```bash
 python3 -m venv .venv-nn
 source .venv-nn/bin/activate
 pip install --upgrade pip
-# Use --index-url https://download.pytorch.org/whl/cpu for CPU-only, or default CUDA wheel for GPU:
+
+# Use --index-url https://download.pytorch.org/whl/cpu for CPU-only, or your CUDA wheel for GPU:
 pip install torch torchvision
 pip install -r requirements/nninteractive.txt
 pip install -e . --no-deps
+deactivate
 ```
 
 ---
 
-## Default Directory Layout & Weights
+## Getting Started
 
-By default, `recist-benchmark` and `scripts/download_weights.sh` use repository-relative paths (all ignored by `.gitignore`):
+### 1. Download checkpoints
+
+Download the public `MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0` checkpoints into `./assets` and verify them against [`configs/weights.sha256`](configs/weights.sha256):
+
+```bash
+bash scripts/download_weights.sh        # defaults to ./assets (or pass a custom path)
+```
+
+Place the `RECIST-EffTiny-m8` checkpoint at `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and optionally `RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` if running `--model-scope all-six`). Passing `--verify-sha256` checks every file hash automatically before inference starts.
+
+### 2. Prepare input NPZs
+
+By default, all inference scripts use repository-relative folders (all ignored by `.gitignore`):
 
 ```text
 RECIST-EffMedSAM2/
 ├── data/
-│   ├── inputs/           # default --input-dir (*.npz)
-│   └── window_twins/     # optional, auto-detected for SAM when data/inputs/ is used
-├── assets/               # default --assets-dir
-├── .venv-sam/            # auto-detected --sam-python
-├── .venv-nn/             # auto-detected --nn-python
-└── runs/
-    └── benchmark/        # default --output-dir
+│   ├── inputs/           # place your case *.npz files here
+│   └── window_twins/     # optional separate pre-windowed SAM twins
+├── assets/               # downloaded checkpoints
+└── runs/                 # predictions, metrics, plots, and summary CSVs
 ```
 
-Download the public Hugging Face checkpoints (`MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0`) into `assets/` and verify SHA-256 checksums against `configs/weights.sha256`:
+Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
+- `imgs`: preserved HU CT volume (`intensity_encoding="nifti_stored_scaled_v1"` with `hu_slope`/`hu_intercept`), raw unencoded HU, or a pre-windowed/normalized volume (`float32` in `[0, 1]` / `[0, 255]`, or legacy `uint8`).
+- `recist`: integer `(Z, Y, X)` mask with non-zero lesion IDs drawn on each lesion's axial RECIST slice.
+- `spacing`: float `(3,)` physical voxel spacing `[sx, sy, sz]` in mm.
+- `gts` *(optional)*: integer `(Z, Y, X)` ground-truth mask for Dice and volume evaluation.
+
+> [!IMPORTANT]
+> **Do not quantize raw HU images down to `uint8` if full precision is desired:**
+> - **`nnInteractive`** expects raw unwindowed Hounsfield Units (passed straight through as `float32`).
+> - **`RECIST-EffMedSAM2` & `MedSAM2`** window HU volumes continuously in `float32` (`L40/W400`) and keep `float32` inputs at full precision through bilinear resizing (legacy `uint8` twins remain supported for backward compatibility).
+
+### 3. Run inference
+
+Three standalone shell scripts mirror the three model families. Each script automatically picks `.venv-sam` or `.venv-nn`, reloads the model fresh per case, profiles CPU/RAM/GPU usage, and writes summary CSVs to `runs/`:
 
 ```bash
-bash scripts/download_weights.sh        # defaults to ./assets
-# or specify a custom directory:
-bash scripts/download_weights.sh /path/to/model_assets
+# 1) RECIST-EffMedSAM2 (Tiny by default; pass --limit 1 for a fast single-case check)
+bash scripts/infer_effmedsam2.sh --limit 1
+
+# 2) MedSAM2 (FLARE25 RECIST baseline)
+bash scripts/infer_medsam2.sh
+
+# 3) nnInteractive (runs box, 3-point, and scribble configs; CPU by default)
+bash scripts/infer_nninteractive.sh
 ```
 
-Expected layout under `assets/` (or custom `$ASSETS`):
-
-| Model | Relative Path under `assets/` | SHA-256 |
-|---|---|---|
-| `medsam2_box` | `MedSAM2-RECIST/checkpoints/medsam2_FLARE25_RECIST_baseline.pt` | `890e6e10924984c7b704a1984362c53a56dc0ee27c796a34eb49c83a1dc4a144` |
-| `nninteractive_*` | `nninteractive_hf_models/models/nnInteractive_v1.0/` (`fold_0/checkpoint_final.pth`, `plans.json`, `dataset.json`, `inference_session_class.json`) | Verified in `configs/weights.sha256` |
-| `efftiny_m8_ep40_box` | `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` | `0b377887f5587cbfd42dbc739a1711f30db276f3fd4c849233df2142ee4f5f5d` |
-| `effsmall_m8_ep40_box` (optional) | `RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` | `423793cec97e9ec93b70c25fbff1c8267d1a1f58deed254b79e16caf7b489fb3` |
-
-Place `RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` into `assets/` and pass `--verify-sha256` to enforce strict pre-run verification.
-
----
-
-## Input NPZ Format
-
-Each input `.npz` file represents one 3D CT case with arrays in `(Z, Y, X)` voxel order and `(X, Y, Z)` physical spacing:
-
-- `imgs`:
-  - **HU channel (`nifti_stored_scaled_v1` or raw HU for `nnInteractive`):** stored CT array accompanied by `intensity_encoding="nifti_stored_scaled_v1"`, `hu_slope`, and `hu_intercept`. `ct_inputs.py` reconstructs `float64` HU for `nnInteractive` and windows continuously to `float32 [0.0, 1.0]` (`L40/W400 [-160, 240]`, no `uint8` truncation) at the SAM model boundary; raw unencoded `imgs` also passes through to `nnInteractive` when `--require-raw-hu` is omitted.
-  - **Normalized / pre-windowed channel (`float32` or legacy `uint8`):** 3D `float32` array in `[0.0, 1.0]` or `[0.0, 255.0]` (kept at full `float32` precision through bilinear `cv2.resize`), or legacy `uint8` array in `[0, 255]`. Supported directly for SAM (and `nnInteractive` when `--require-raw-hu` is omitted), or paired via `data/window_twins/` (auto-detected) / `--window-dir /path/to/windowed_npz` so SAM reads pre-windowed/normalized volumes while `nnInteractive` reads HU volumes.
-- `recist`: integer `(Z, Y, X)` label array with non-zero lesion IDs drawn on each lesion's axial RECIST slice.
-- `spacing`: float `(3,)` physical spacing `[sx, sy, sz]` in mm.
-- `gts` (or `gts_hidden`, optional): integer `(Z, Y, X)` ground-truth mask for Dice/volume evaluation (never used as a prompt source for RECIST modes).
-
----
-
-## Running Inference
-
-### 1. Zero-flag Quick Start (using default `data/inputs/`, `assets/`, `.venv-sam/`, `.venv-nn/`)
+Common one-flag switches work across all three scripts:
 
 ```bash
-# Single-case CPU smoke test
-recist-benchmark --limit 1 --verify-sha256 --plots
-
-# Full default CPU run on data/inputs/
-recist-benchmark --verify-sha256 --plots
+# Run on physical GPU 2, enable moving-centroid postprocessing, or override paths:
+bash scripts/infer_effmedsam2.sh --device cuda --gpu-index 2 --postprocess moving_centroid
+bash scripts/infer_nninteractive.sh --models nninteractive_box_hu --device cuda --gpu-index 0
 ```
 
-### 2. Explicit paths (single cancer-type CPU run, with optional postprocessing)
+To run the entire 5-model paper benchmark in one sweep and generate combined comparison tables:
 
 ```bash
-recist-benchmark \
-  --input-dir /path/to/hu_inputs/colon_cancer \
-  --window-dir /path/to/window_twins/colon_cancer \
-  --output-dir runs/eay_colon_cpu \
-  --assets-dir "$ASSETS" \
-  --sam-python .venv-sam/bin/python \
-  --nn-python .venv-nn/bin/python \
-  --device cpu \
-  --num-threads 1 \
-  --postprocess moving_centroid \
-  --verify-sha256 \
-  --plots
+.venv-sam/bin/recist-benchmark --verify-sha256 --plots
 ```
 
-### 3. Running a single model or switching to GPU (including non-0 physical GPU)
+<details>
+<summary>Custom paths & standalone Python CLIs</summary>
 
 ```bash
-# Single model on CPU
-recist-benchmark \
-  --input-dir /path/to/data \
-  --output-dir runs/efftiny_cpu \
-  --models efftiny_m8_ep40_box \
-  --device cpu \
-  --num-threads 1
+# Explicit input/output/window-twin folders (adds --recursive for nested cancer subfolders)
+bash scripts/infer_effmedsam2.sh \
+  --input-dir /path/to/hu_inputs \
+  --window-dir /path/to/window_twins \
+  --output-dir runs/effmedsam2_cohort \
+  --recursive \
+  --postprocess moving_centroid
 
-# GPU execution on physical GPU 2 (same codebase; NVML monitors physical GPU 2)
-recist-benchmark \
-  --input-dir /path/to/data \
-  --output-dir runs/paper5_gpu2 \
-  --device cuda \
-  --gpu-index 2 \
-  --num-threads 1
+# Run Small variant instead of Tiny
+MODEL=effsmall_m8_ep40_box bash scripts/infer_effmedsam2.sh
+
+# Single-process Python backend CLIs (without the outer benchmark coordinator)
+.venv-sam/bin/recist-sam-infer -i /path/to/case.npz -o runs/sam_single \
+  --backend eff --model-size tiny --weights assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt \
+  --device cpu --num-threads 1 --prompt box --postprocess moving_centroid --disable-image-encoder-compile
+
+.venv-nn/bin/recist-nninteractive-infer -i /path/to/case.npz -o runs/nn_single \
+  --checkpoint assets/nninteractive_hf_models/models/nnInteractive_v1.0 \
+  --device cpu --num-threads 1 --prompt-mode 3pt_25 --interaction batch
 ```
 
-### 4. Standalone backend CLIs
+</details>
 
-Both backends also expose standalone CLIs (defaulting to `data/inputs/` -> `runs/sam/` or `runs/nninteractive/`):
-
-```bash
-# SAM / EfficientMedSAM2
-recist-sam-infer \
-  -i /path/to/case.npz \
-  -o runs/sam_single \
-  --backend eff \
-  --model-size tiny \
-  --weights "$ASSETS/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt" \
-  --device cpu \
-  --num-threads 1 \
-  --prompt box \
-  --postprocess moving_centroid \
-  --disable-image-encoder-compile
-
-# nnInteractive
-recist-nninteractive-infer \
-  -i /path/to/case.npz \
-  -o runs/nn_single \
-  --checkpoint "$ASSETS/nninteractive_hf_models/models/nnInteractive_v1.0" \
-  --device cpu \
-  --num-threads 1 \
-  --prompt-mode 3pt_25 \
-  --interaction batch
-```
-
-For performance/resource metric definitions, output CSV schemas, `recist-eval`, and offline verification tests, see [`docs/metrics_and_evaluation.md`](docs/metrics_and_evaluation.md).
+For runtime/memory metric definitions, output CSV schemas, `recist-eval`, and offline `pytest` verification, see [`docs/metrics_and_evaluation.md`](docs/metrics_and_evaluation.md).
 
 ---
 
 ## Supported Model Configurations
 
-| Method | Prompt Derived from RECIST | Model ID (`configs/models.json`) | Default Scope |
-|---|---|---|---|
-| **RECIST-EffMedSAM2 (Tiny m8, ep40)** | Square box from SVD diameter | `efftiny_m8_ep40_box` | Paper (5 configs) |
-| **MedSAM2** | Square box from SVD diameter | `medsam2_box` | Paper (5 configs) |
-| **nnInteractive-box** | 2D box on RECIST slice | `nninteractive_box_hu` | Paper (5 configs) |
-| **nnInteractive-point** | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
-| **nnInteractive-scribble** | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
-| EfficientMedSAM2-Small (Small m8, ep40) | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
+| Model Family | Script | Prompt Derived from RECIST | Model ID (`configs/models.json`) | Scope |
+|---|---|---|---|---|
+| **RECIST-EffMedSAM2** (Tiny m8, ep40) | `scripts/infer_effmedsam2.sh` | Square box from SVD diameter | `efftiny_m8_ep40_box` | Paper (5 configs) |
+| **MedSAM2** | `scripts/infer_medsam2.sh` | Square box from SVD diameter | `medsam2_box` | Paper (5 configs) |
+| **nnInteractive-box** | `scripts/infer_nninteractive.sh` | 2D box on RECIST slice | `nninteractive_box_hu` | Paper (5 configs) |
+| **nnInteractive-point** | `scripts/infer_nninteractive.sh` | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
+| **nnInteractive-scribble** | `scripts/infer_nninteractive.sh` | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
+| EfficientMedSAM2-Small (Small m8, ep40) | `MODEL=effsmall_m8_ep40_box scripts/infer_effmedsam2.sh` | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
 
-### Real GPU cold-start acceptance test
+---
 
-From the checkout, install pytest in the SAM environment and run the test on an
-allocated GPU. For example, on a workstation with physical GPU 2 available:
+## License
 
-```bash
-.venv-sam/bin/python -m pip install pytest
-CUDA_VISIBLE_DEVICES=2 RECIST_REQUIRE_CUDA=1 .venv-sam/bin/python -m pytest -q -s tests/test_cuda_cold_start.py
-```
+This codebase is released under the **Apache-2.0** license (see [`LICENSE`](LICENSE)). Third-party pre-trained checkpoints downloaded by `scripts/download_weights.sh` retain their upstream licenses — in particular, **`nnInteractive_v1.0` is licensed under `CC BY-NC-SA 4.0`** (non-commercial), and `MedSAM2` follows its upstream FLARE25 release terms.
 
-On a scheduler-managed node, keep its assigned `CUDA_VISIBLE_DEVICES` instead.
-The test starts a fresh Python interpreter, checks that the CPU path leaves CUDA
-uninitialized, then resets real CUDA peak counters and verifies a real tensor
-allocation. Without `RECIST_REQUIRE_CUDA=1`, GPU-less test environments skip
-this test; with it, absent hardware or a missing CUDA-enabled PyTorch fails.
-This allocator test does not replace a one-case run with real model weights.
+## Citation
+
+> Manuscript / arXiv citation coming soon.
+
+## Acknowledgments
+
+Built upon [MedSAM2](https://github.com/bowang-lab/MedSAM2), [EfficientTAM](https://github.com/yformer/EfficientTAM), [nnInteractive](https://github.com/MIC-DKFZ/nnInteractive), and [FLARE-Efficiency](https://github.com/medfm-flare/FLARE-Efficiency).

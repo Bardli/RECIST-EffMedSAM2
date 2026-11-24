@@ -34,7 +34,7 @@ command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || echo "No NVIDIA GPU to
 If `--device cuda` was requested, confirm the physical GPU index `--gpu-index N` exists in `nvidia-smi -L`.
 
 ### Step 2: Create Virtual Environments
-Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family.
+Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. Note that both `requirements/sam.txt` and `requirements/nninteractive.txt` already include `requirements/core.txt`, so `.venv` is optional if the user only needs one model family.
 
 1. **Core package (`.venv` — runner, profiler, prompts, evaluator, pytest):**
    ```bash
@@ -45,13 +45,14 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family.
    ```
 
 2. **SAM / EfficientMedSAM2 environment (`.venv-sam`):**
+   *(Install the pinned `MedSAM2` checkout editable `-e` so upstream EfficientTAM Hydra config files are preserved.)*
    - **CPU-only:**
      ```bash
      python3 -m venv .venv-sam
      .venv-sam/bin/pip install --upgrade pip
      .venv-sam/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
      .venv-sam/bin/pip install -r requirements/sam.txt
-git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+     git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
      git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
      SAM2_BUILD_CUDA=0 .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
      .venv-sam/bin/pip install -e . --no-deps
@@ -62,7 +63,7 @@ git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
      .venv-sam/bin/pip install --upgrade pip
      .venv-sam/bin/pip install torch torchvision
      .venv-sam/bin/pip install -r requirements/sam.txt
-git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
+     git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
      git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
      .venv-sam/bin/pip install --no-build-isolation -e .venv-sam/src/MedSAM2
      .venv-sam/bin/pip install -e . --no-deps
@@ -103,7 +104,7 @@ Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to 
 - Pass `--require-raw-hu` on `recist-benchmark` only when strictly enforcing `nifti_stored_scaled_v1` HU decoding and rejecting pre-windowed inputs.
 
 ### Step 6: Run 1-Case Smoke Test & Audit Telemetry
-Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots`:
+Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots` (use `recist-benchmark` for multi-model comparisons, or `bash scripts/infer_effmedsam2.sh` / `bash scripts/infer_medsam2.sh` / `bash scripts/infer_nninteractive.sh` for single-model runs):
 ```bash
 .venv/bin/recist-benchmark \
   --input-dir "<INPUT_DIR>" \
@@ -130,7 +131,7 @@ Audit `runs/smoke_test/reports/case_metrics.csv`:
 Unless the user explicitly requested an unattended full run in Step 0, share the 1-case CSV summary and wait for confirmation before launching the full dataset.
 
 ### Step 7: Full Benchmark & Final Report
-Run without `--limit` to an explicit cohort `--output-dir`:
+Run without `--limit` to an explicit cohort `--output-dir` (via `recist-benchmark` for the full paper suite, or the per-model `.sh` script under `scripts/`):
 ```bash
 .venv/bin/recist-benchmark \
   --input-dir "<INPUT_DIR>" \

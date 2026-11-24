@@ -330,3 +330,110 @@ def test_non_zero_gpu_dispatch_and_default_layout(tmp_path: Path):
     assert all("CUDA_VISIBLE_DEVICES=2" in ln for ln in lines)
     assert all("--device cuda:0" in ln for ln in lines)
     assert all("--gpu-index 2" in ln for ln in lines)
+
+
+def test_shell_inference_scripts(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    scripts_dir = repo_root / "scripts"
+    for name in (
+        "download_weights.sh",
+        "infer_effmedsam2.sh",
+        "infer_medsam2.sh",
+        "infer_nninteractive.sh",
+    ):
+        syntax = subprocess.run(["bash", "-n", str(scripts_dir / name)], capture_output=True, text=True)
+        assert syntax.returncode == 0, syntax.stderr
+
+    in_dir = tmp_path / "inputs"
+    in_dir.mkdir(parents=True)
+    _make_synthetic_case(in_dir / "c1.npz")
+
+    env = os.environ.copy()
+    env["PYTHON"] = sys.executable
+
+    expected_models = {
+        "infer_effmedsam2.sh": ["efftiny_m8_ep40_box"],
+        "infer_medsam2.sh": ["medsam2_box"],
+        "infer_nninteractive.sh": [
+            "nninteractive_box_hu",
+            "nninteractive_3pt_25_hu",
+            "nninteractive_line_skel_in3_hu",
+        ],
+    }
+    for script_name, models in expected_models.items():
+        dry = subprocess.run(
+            [
+                "bash",
+                str(scripts_dir / script_name),
+                "--input-dir",
+                str(in_dir),
+                "--device",
+                "cuda",
+                "--gpu-index",
+                "2",
+                "--dry-run",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert dry.returncode == 0, dry.stdout + "\n" + dry.stderr
+        lines = [ln for ln in dry.stdout.splitlines() if ln.startswith("[dry-run]")]
+        assert len(lines) == len(models)
+        for model_name in models:
+            assert any(f"--model-name {model_name}" in ln for ln in lines)
+        assert all("--gpu-index 2" in ln for ln in lines)
+
+    # Explicit --models override works on infer_nninteractive.sh
+    nn_one = subprocess.run(
+        [
+            "bash",
+            str(scripts_dir / "infer_nninteractive.sh"),
+            "--input-dir",
+            str(in_dir),
+            "--models",
+            "nninteractive_box_hu",
+            "--dry-run",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert nn_one.returncode == 0, nn_one.stderr
+    nn_lines = [ln for ln in nn_one.stdout.splitlines() if ln.startswith("[dry-run]")]
+    assert len(nn_lines) == 1
+    assert "--model-name nninteractive_box_hu" in nn_lines[0]
+
+    # End-to-end execution via infer_effmedsam2.sh with mock backend + --limit 1
+    out_dir = tmp_path / "out_eff_sh"
+    run_eff = subprocess.run(
+        [
+            "bash",
+            str(scripts_dir / "infer_effmedsam2.sh"),
+            "--input-dir",
+            str(in_dir),
+            "--output-dir",
+            str(out_dir),
+            "--limit",
+            "1",
+            "--backend-override",
+            "mock",
+            "--sample-interval",
+            "0.02",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run_eff.returncode == 0, run_eff.stdout + "\n" + run_eff.stderr
+    with (out_dir / "reports" / "case_metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["model"] == "efftiny_m8_ep40_box"
+    assert rows[0]["status"] == "ok"

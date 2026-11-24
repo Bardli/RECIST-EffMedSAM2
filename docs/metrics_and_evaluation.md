@@ -79,3 +79,14 @@ Offline unit and end-to-end synthetic tests validate phase breakdown math (`runt
 ```bash
 pytest -v
 ```
+
+### Real GPU cold-start acceptance test
+
+From the checkout, install `pytest` in `.venv-sam` and run on an allocated GPU (for example, physical GPU 2):
+
+```bash
+.venv-sam/bin/python -m pip install pytest
+CUDA_VISIBLE_DEVICES=2 RECIST_REQUIRE_CUDA=1 .venv-sam/bin/python -m pytest -q -s tests/test_cuda_cold_start.py
+```
+
+On a scheduler-managed node, keep its assigned `CUDA_VISIBLE_DEVICES` instead. The test starts a fresh Python interpreter, checks that the CPU path leaves CUDA uninitialized, then resets real CUDA peak counters and verifies a real tensor allocation. Without `RECIST_REQUIRE_CUDA=1`, GPU-less test environments skip this test; with it, absent hardware or a missing CUDA-enabled PyTorch fails. This allocator test does not replace a one-case run with real model weights.
