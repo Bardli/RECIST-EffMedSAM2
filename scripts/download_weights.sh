@@ -30,13 +30,19 @@ download_file() {
   mv "$dest.part" "$dest"
 }
 
-# 1. MedSAM2 RECIST checkpoint (pinned commit)
+# 1. RECIST-EffMedSAM2 Tiny (m8, epoch 40) checkpoint (GitHub Release)
+EFF_RELEASE_TAG="weights-v1"
+download_file \
+  "https://github.com/Bardli/RECIST-EffMedSAM2/releases/download/${EFF_RELEASE_TAG}/RECIST-EffTiny-m8-epoch40.pt" \
+  "$ASSETS_DIR/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt"
+
+# 2. MedSAM2 RECIST checkpoint (pinned commit)
 MEDSAM2_REV="e4a6f35edd7e091619cbc0750f462f1574e23955"
 download_file \
   "https://huggingface.co/wanglab/MedSAM2/resolve/${MEDSAM2_REV}/medsam2_FLARE25_RECIST_baseline.pt" \
   "$ASSETS_DIR/MedSAM2-RECIST/checkpoints/medsam2_FLARE25_RECIST_baseline.pt"
 
-# 2. nnInteractive v1.0 official release (pinned commit)
+# 3. nnInteractive v1.0 official release (pinned commit)
 NN_REV="3f308d751c00644e4fde6f09c600264b393b21b5"
 for rel in \
   "LICENSE" \
@@ -50,23 +56,18 @@ for rel in \
 done
 
 echo ""
-echo "[verify] Checking downloaded public weights against $MANIFEST..."
+echo "[verify] Checking downloaded checkpoints against $MANIFEST..."
 (
   cd "$ASSETS_DIR"
-  grep -E 'MedSAM2-RECIST|nninteractive_hf_models' "$MANIFEST" | sha256sum -c -
+  grep -E 'RECIST-EffTiny-m8|MedSAM2-RECIST|nninteractive_hf_models' "$MANIFEST" | sha256sum -c -
 )
 
-EFF_TINY="$ASSETS_DIR/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt"
-echo ""
-if [[ -f "$EFF_TINY" ]]; then
-  echo "[verify] Checking RECIST-EffTiny-m8 checkpoint..."
+EFF_SMALL="$ASSETS_DIR/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt"
+if [[ -f "$EFF_SMALL" ]]; then
+  echo ""
+  echo "[verify] Checking optional RECIST-EffSmall-m8 checkpoint..."
   (
     cd "$ASSETS_DIR"
-    grep 'RECIST-EffTiny-m8' "$MANIFEST" | sha256sum -c -
+    grep 'RECIST-EffSmall-m8' "$MANIFEST" | sha256sum -c -
   )
-else
-  echo "[note] Place RECIST-EffTiny-m8 epoch 40 checkpoint at:"
-  echo "       $EFF_TINY"
-  echo "       and verify with:"
-  echo "       (cd \"$ASSETS_DIR\" && grep RECIST-EffTiny-m8 \"$MANIFEST\" | sha256sum -c -)"
 fi

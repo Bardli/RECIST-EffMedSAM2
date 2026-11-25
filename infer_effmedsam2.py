@@ -123,7 +123,7 @@ def main() -> int:
     ckpt_path = (args.checkpoint or DEFAULT_CHECKPOINT_BY_SIZE[args.model_size]).resolve()
     if not ckpt_path.is_file():
         raise FileNotFoundError(
-            f"Checkpoint not found: {ckpt_path}. Pass --checkpoint or check assets/."
+            f"Checkpoint not found: {ckpt_path}. Run scripts/download_weights.sh or pass --checkpoint."
         )
     cfg_arg = resolve_cfg(args.cfg, args.model_size)
     model_name = args.model_name or ("EffMedSAM2" if args.model_size == "tiny" else "EffMedSAM2_small")

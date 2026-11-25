@@ -74,11 +74,11 @@ uv pip install --python .venv-sam/bin/python pytest
 All offline tests must pass before proceeding (`tests/test_cuda_cold_start.py` skips automatically when CUDA PyTorch/hardware is unavailable).
 
 ### Step 4: Download & Verify Checkpoints
-Download the public `MedSAM2` RECIST checkpoint and `nnInteractive_v1.0` checkpoints into `./assets` and check SHA-256 checksums against `configs/weights.sha256`:
+Download and SHA-256-verify all three default checkpoints (`RECIST-EffTiny-m8`, `MedSAM2`, and `nnInteractive_v1.0`) into `./assets` against `configs/weights.sha256`:
 ```bash
 bash scripts/download_weights.sh
 ```
-Check whether `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and `assets/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` if running `--model-size small`) is present. If a checkpoint is missing, stop and inform the user so they can provide its path via `--checkpoint` or copy it into `assets/`.
+Confirm `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and the `MedSAM2` / `nnInteractive_v1.0` files) passed verification. Only the optional `--model-size small` variant (`assets/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt`) requires a locally supplied checkpoint path via `--checkpoint` if explicitly requested.
 
 ### Step 5: Validate Input NPZs (HU & Normalized/Windowed Channels)
 Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to confirm keys, shape, dtype, and `utils/ct_inputs.py` compatibility:

@@ -61,13 +61,13 @@ uv pip install --python .venv-nn/bin/python -r requirements/nninteractive.txt
 
 ### 1. Download checkpoints
 
-Download the public `MedSAM2` RECIST checkpoint and `nnInteractive_v1.0` checkpoints into `./assets` and verify them against [`configs/weights.sha256`](configs/weights.sha256):
+Download and SHA-256-verify all three default checkpoints — `RECIST-EffMedSAM2 Tiny` (from the [GitHub Release `weights-v1`](https://github.com/Bardli/RECIST-EffMedSAM2/releases/tag/weights-v1)), `MedSAM2`, and `nnInteractive_v1.0` — into `./assets` against [`configs/weights.sha256`](configs/weights.sha256):
 
 ```bash
 bash scripts/download_weights.sh        # defaults to ./assets (or pass a custom path)
 ```
 
-Place the `RECIST-EffTiny-m8` checkpoint at `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and optionally `assets/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` for `--model-size small`).
+*(The optional `--model-size small` variant, `assets/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt`, is not included in the default download and can be passed locally via `--checkpoint` if needed.)*
 
 ### 2. Prepare input NPZs
 
