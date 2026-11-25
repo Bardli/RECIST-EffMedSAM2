@@ -95,8 +95,8 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```
 Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full diagnostic JSON receipt (`runs/smoke_eff/metrics/<case_id>.metrics.json`):
 - In `runs/smoke_eff/results.csv`:
-  - `total_inference_time_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `end_to_end_wall_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
-  - `end_to_end_wall_time_including_io_s >= total_inference_time_s` on the 1st lesion row.
+  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `total_end_to_end_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
+  - `total_end_to_end_time_including_io_s >= total_model_time_load_infer_post_s` on the 1st lesion row.
   - `peak_ram_mb > 0`, and `predicted_volume_ml` / `dice_score` reflect the final saved output.
   - No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced.
 - In `runs/smoke_eff/metrics/<case_id>.metrics.json`:
@@ -127,7 +127,7 @@ Summarize observed results from:
 ## Part B — Strict Execution, HU & Repo Hygiene Policy
 
 ### 1. Execution & Model-Loading Invariants
-1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case loop iteration, are counted in `total_inference_time_s` (`model_loading_time_s + model_inference_time_s + postprocessing_time_s`), and explicitly clean up (`del`, `gc.collect()`, `empty_cache()`) after each case.
+1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case loop iteration, are counted in `total_model_time_load_infer_post_s` (`model_loading_time_s + model_inference_time_s + postprocessing_time_s`), and explicitly clean up (`del`, `gc.collect()`, `empty_cache()`) after each case.
 2. **Postprocessing inside profiler & final-only output:** `moving_centroid` postprocessing executes inside `CaseProfiler.phase("postprocessing_time")`, and only the final prediction NPZ and final Dice/volume columns are written.
 3. **RECIST prompt alignment:** Slice discovery (`find_recist_slices`) and 2D prompt extraction run inside `image_preprocessing_time_s` so `model_inference_time_s` and per-lesion timing cover pure inference symmetrically.
 3. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to keep host RAM bounded and timings stable.

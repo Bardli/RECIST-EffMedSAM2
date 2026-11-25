@@ -117,7 +117,7 @@ def test_final_only_postprocessing_saves_single_npz_and_no_intermediate_dirs(tmp
     assert rec["metrics"]["postprocessing_time_s"] > 0.0
     assert rec["per_lesion_postprocessing_time_s"]["1"] > 0.0
     assert np.isclose(
-        rec["metrics"]["total_inference_time_s"],
+        rec["metrics"]["total_model_time_load_infer_post_s"],
         rec["metrics"]["model_loading_time_s"]
         + rec["metrics"]["model_inference_time_s"]
         + rec["metrics"]["postprocessing_time_s"],
@@ -183,14 +183,14 @@ def _make_record(
             for i, (gid, dice, pvox, _, _) in enumerate(lesions)
         ],
         "metrics": {
-            "total_inference_time_s": total_inf,
+            "total_model_time_load_infer_post_s": total_inf,
             "model_loading_time_s": load_s,
             "model_inference_time_s": inf_total,
             "postprocessing_time_s": post_total,
             "data_loading_time_s": 0.05123,
             "image_preprocessing_time_s": 0.04123,
             "output_saving_time_s": 0.03123,
-            "end_to_end_wall_time_including_io_s": wall_s,
+            "total_end_to_end_time_including_io_s": wall_s,
             "MaxRAM_MB": ram_mb,
             "ram_baseline_mb": 100.0,
             "ram_inference_peak_mb": ram_mb - 10.0,
@@ -349,7 +349,17 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert eff_hdr == RESULT_COLUMNS
     assert len(eff_hdr) == 18
     assert not (set(eff_hdr) & DIAGNOSTIC_ONLY_COLUMNS)
-    assert not any(c.startswith("post_") or c in ("total_runtime_s", "single_lesion_inference_time_s") for c in eff_hdr)
+    assert not any(
+        c.startswith("post_")
+        or c
+        in (
+            "total_runtime_s",
+            "single_lesion_inference_time_s",
+            "total_inference_time_s",
+            "end_to_end_wall_time_including_io_s",
+        )
+        for c in eff_hdr
+    )
     assert len(eff_rows) == 4  # 1 (case_01) + 2 (case_02) + 1 (case_03_err fallback)
 
     # Single-lesion case: 4-decimal rounding & exact additivity, 1-decimal RAM/VRAM
@@ -359,7 +369,7 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert c1["model_inference_time_s"] == "1.2346"
     assert c1["postprocessing_time_s"] == "0.1"
     assert np.isclose(
-        float(c1["total_inference_time_s"]),
+        float(c1["total_model_time_load_infer_post_s"]),
         float(c1["model_loading_time_s"])
         + float(c1["model_inference_time_s"])
         + float(c1["postprocessing_time_s"]),
@@ -374,21 +384,21 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert float(c2_l1["data_loading_time_s"]) == 0.0512
     assert float(c2_l1["image_preprocessing_time_s"]) == 0.0412
     assert float(c2_l1["output_saving_time_s"]) == 0.0312
-    assert float(c2_l1["end_to_end_wall_time_including_io_s"]) == 2.72
+    assert float(c2_l1["total_end_to_end_time_including_io_s"]) == 2.72
     assert float(c2_l1["model_inference_time_s"]) == 1.1
     assert float(c2_l1["postprocessing_time_s"]) == 0.12
-    assert np.isclose(float(c2_l1["total_inference_time_s"]), 1.72)
+    assert np.isclose(float(c2_l1["total_model_time_load_infer_post_s"]), 1.72)
 
     assert float(c2_l2["model_loading_time_s"]) == 0.0
     assert float(c2_l2["data_loading_time_s"]) == 0.0
     assert float(c2_l2["image_preprocessing_time_s"]) == 0.0
     assert float(c2_l2["output_saving_time_s"]) == 0.0
-    assert float(c2_l2["end_to_end_wall_time_including_io_s"]) == 0.0
+    assert float(c2_l2["total_end_to_end_time_including_io_s"]) == 0.0
     assert float(c2_l2["model_inference_time_s"]) == 0.8
     assert float(c2_l2["postprocessing_time_s"]) == 0.08
-    assert np.isclose(float(c2_l2["total_inference_time_s"]), 0.88)
+    assert np.isclose(float(c2_l2["total_model_time_load_infer_post_s"]), 0.88)
     assert np.isclose(
-        float(c2_l1["total_inference_time_s"]) + float(c2_l2["total_inference_time_s"]),
+        float(c2_l1["total_model_time_load_infer_post_s"]) + float(c2_l2["total_model_time_load_infer_post_s"]),
         2.60,
     )
 
@@ -400,7 +410,7 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert c3["ground_truth_volume_ml"] == ""
     assert c3["predicted_volume_ml"] == ""
     assert float(c3["model_loading_time_s"]) == 0.2
-    assert float(c3["total_inference_time_s"]) == 0.2
+    assert float(c3["total_model_time_load_infer_post_s"]) == 0.2
     assert c3["peak_ram_mb"] == "400.0"
 
     # Merge into a single metric-grouped CSV without PYTHONPATH
@@ -444,7 +454,9 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert len(MERGED_SHARED_COLUMNS) == 4
     assert not (set(mhdr) & DIAGNOSTIC_ONLY_COLUMNS)
     # Exactly one time column per model in the merged table
-    assert [c for c in mhdr if "time" in c] == [f"{pref}_total_inference_time_s" for pref in expected_prefixes]
+    assert [c for c in mhdr if "time" in c] == [
+        f"{pref}_total_model_time_load_infer_post_s" for pref in expected_prefixes
+    ]
 
     assert len(mrows) == 4  # case_01 (id 1), case_02 (id 1, id 2), case_03_err (empty lesion_id)
     r0 = mrows[0]
@@ -455,8 +467,8 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert r0["EffMedSAM2_cuda_dice_score"] == "0.89"
     assert r0["MedSAM2_dice_score"] == "0.84"
     assert r0["nnInteractive_box_dice_score"] == "0.91"
-    assert np.isclose(float(r0["EffMedSAM2_cpu_total_inference_time_s"]), 1.7469)
-    assert np.isclose(float(r0["MedSAM2_total_inference_time_s"]), 3.0)
+    assert np.isclose(float(r0["EffMedSAM2_cpu_total_model_time_load_infer_post_s"]), 1.7469)
+    assert np.isclose(float(r0["MedSAM2_total_model_time_load_infer_post_s"]), 3.0)
     assert r0["EffMedSAM2_cuda_peak_gpu_memory_mb"] == "2200.0"
 
     # Also check direct .csv path via -o out/custom.csv

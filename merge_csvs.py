@@ -70,8 +70,8 @@ def main() -> int:
     for s in summaries:
         dice_s = f"{s['mean_dice_score']:.4f}" if s["mean_dice_score"] is not None else "n/a"
         time_s = (
-            f"{s['mean_case_total_inference_time_s']:.3f}s"
-            if s["mean_case_total_inference_time_s"] is not None
+            f"{s['mean_case_total_model_time_load_infer_post_s']:.3f}s"
+            if s["mean_case_total_model_time_load_infer_post_s"] is not None
             else "n/a"
         )
         ram_s = f"{s['max_peak_ram_mb']:.1f}MB" if s["max_peak_ram_mb"] is not None else "n/a"
@@ -79,7 +79,7 @@ def main() -> int:
         print(
             f"  {s['column_prefix']} ({s['device'] or 'n/a'}): "
             f"cases={s['cases']} | lesions={s['lesions']} | "
-            f"mean_dice={dice_s} | mean_total_inf={time_s} | peak_ram={ram_s} | peak_gpu={gpu_s}"
+            f"mean_dice={dice_s} | mean_model_time={time_s} | peak_ram={ram_s} | peak_gpu={gpu_s}"
         )
     return 0
 

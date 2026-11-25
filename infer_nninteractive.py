@@ -141,7 +141,7 @@ def main() -> int:
             gpu_tolerance_mb=args.gpu_tolerance_mb,
         ) as profiler:
             try:
-                # 1. Model loading (counted in total_inference_time_s)
+                # 1. Model loading (counted in total_model_time_load_infer_post_s)
                 with profiler.phase("model_loading_time"):
                     session_kwargs = dict(
                         device=torch_device,
@@ -155,7 +155,7 @@ def main() -> int:
                     session = nnInteractiveInferenceSession(**session_kwargs)
                     session.initialize_from_trained_model_folder(model_training_output_dir=str(ckpt_dir), use_fold=fold)
 
-                # 2. Data load & decompression (excluded from total_inference_time_s)
+                # 2. Data load & decompression (excluded from total_model_time_load_infer_post_s)
                 with profiler.phase("data_loading_time"):
                     with np.load(case_path, allow_pickle=False) as data:
                         imgs = nninteractive_image(data, require_raw=args.require_raw_hu)
@@ -163,7 +163,7 @@ def main() -> int:
                         spacing = np.asarray(data["spacing"])
                         gts, _ = load_gt(data, "auto", case_path.name)
 
-                # 3. Preprocessing + session image setup + RECIST prompt extraction (excluded from total_inference_time_s)
+                # 3. Preprocessing + session image setup + RECIST prompt extraction (excluded from total_model_time_load_infer_post_s)
                 with profiler.phase("image_preprocessing_time"):
                     session.set_image(imgs[None].astype(np.float32))
                     session.set_target_buffer(torch.zeros(imgs.shape, dtype=torch.uint8, device="cpu"))
@@ -218,7 +218,7 @@ def main() -> int:
                     metadata=metadata,
                     scratch=args.scratch,
                 ) as writer:
-                    # 4. Pure model inference (counted in total_inference_time_s)
+                    # 4. Pure model inference (counted in total_model_time_load_infer_post_s)
                     with profiler.phase("model_inference_time"):
                         for lab, z_mid, payload in prepared_prompts:
                             if session.device.type == "cuda":
@@ -330,7 +330,7 @@ def main() -> int:
         m = record["metrics"]
         print(
             f"[{idx + 1}/{len(cases)}] {model_name} | {case_id} | {record['status']} | "
-            f"total_inference={m['total_inference_time_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
+            f"model_time={m['total_model_time_load_infer_post_s']:.3f}s | end_to_end={m['total_end_to_end_time_including_io_s']:.3f}s | "
             f"MaxRAM={m['MaxRAM_MB']:.1f}MB"
         )
 

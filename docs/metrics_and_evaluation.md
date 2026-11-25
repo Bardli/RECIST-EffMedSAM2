@@ -12,22 +12,22 @@ When postprocessing (such as `moving_centroid` in `infer_effmedsam2.py`) is enab
 
 ### Runtime Breakdown (seconds via `time.perf_counter()`, CUDA-synchronized on GPU)
 
-| CSV Column | Included in `total_inference_time_s`? | Definition |
+| CSV Column | Included in `total_model_time_load_infer_post_s`? | Definition |
 |---|---|---|
 | `model_loading_time_s` | **Yes** | Model construction and checkpoint weight loading onto target device |
 | `model_inference_time_s` | **Yes** | Pure model inference for this lesion (state init/reset, prompt application, forward/reverse propagation or AutoZoom); excludes disk load, preprocessing, and saving |
 | `postprocessing_time_s` | **Yes** | Final mask postprocessing (`moving_centroid` per lesion; `0.0` when `none`) |
-| `total_inference_time_s` | **Total** | `model_loading_time_s + model_inference_time_s + postprocessing_time_s` |
+| `total_model_time_load_infer_post_s` | **Total** | `model_loading_time_s + model_inference_time_s + postprocessing_time_s` |
 | `data_loading_time_s` | No (audited separately) | NPZ disk load, decompression, and intensity windowing lookup |
 | `image_preprocessing_time_s` | No (audited separately) | SAM bilinear resize / ImageNet normalization or nnInteractive `set_image`, plus RECIST prompt extraction |
 | `output_saving_time_s` | No (audited separately) | Streamed independent-instance compressed NPZ write & CRC check |
-| `end_to_end_wall_time_including_io_s` | No (audited separately) | Complete external end-to-end case wall-clock time across all phases (load + preprocess + model load + inference + postprocess + save) |
+| `total_end_to_end_time_including_io_s` | No (audited separately) | Complete external end-to-end case time across all phases (load + preprocess + model load + inference + postprocess + save) |
 
 #### Multi-RECIST Timing Rule (No Double-Counting)
 
 Each row in `results.csv` represents **one RECIST lesion**:
 - For a **single-lesion CT**, that single row records all phase timings directly.
-- For a **multi-lesion CT** (same model loaded once per CT volume), case-level shared phases (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `end_to_end_wall_time_including_io_s`) are recorded on the **first lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT, while each lesion row records its own `model_inference_time_s` and `postprocessing_time_s`. Summing any time column across rows gives the true cohort total without double-counting.
+- For a **multi-lesion CT** (same model loaded once per CT volume), case-level shared phases (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`) are recorded on the **first lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT, while each lesion row records its own `model_inference_time_s` and `postprocessing_time_s`. Summing any time column across rows gives the true cohort total without double-counting.
 
 ### Human-Readable CSVs vs. Full JSON Receipts
 
@@ -51,14 +51,14 @@ Each standalone inference script produces **one concise CSV (`<output-dir>/resul
 ```
 
 `results.csv` columns (18):
-`dataset`, `case_id`, `lesion_id`, `model_name`, `device`, `dice_score`, `ground_truth_volume_ml`, `predicted_volume_ml`, `total_inference_time_s`, `model_loading_time_s`, `model_inference_time_s`, `postprocessing_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `end_to_end_wall_time_including_io_s`, `peak_ram_mb`, `peak_gpu_memory_mb`.
+`dataset`, `case_id`, `lesion_id`, `model_name`, `device`, `dice_score`, `ground_truth_volume_ml`, `predicted_volume_ml`, `total_model_time_load_infer_post_s`, `model_loading_time_s`, `model_inference_time_s`, `postprocessing_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `peak_ram_mb`, `peak_gpu_memory_mb`.
 
-Running `merge_csvs.py` merges independent `results.csv` files horizontally into **one compact wide table (`merged_results.csv`)**, organized **by metric** so all models sit directly side-by-side and exposing **only one time column per model** (`<Model>_total_inference_time_s`):
+Running `merge_csvs.py` merges independent `results.csv` files horizontally into **one compact wide table (`merged_results.csv`)**, organized **by metric** so all models sit directly side-by-side and exposing **only one time column per model** (`<Model>_total_model_time_load_infer_post_s`):
 
 1. **Shared lesion metadata:** `dataset`, `case_id`, `lesion_id`, `ground_truth_volume_ml`
 2. **Dice scores across models:** `<ModelA>_dice_score`, `<ModelB>_dice_score`, ...
 3. **Predicted volumes across models:** `<ModelA>_predicted_volume_ml`, `<ModelB>_predicted_volume_ml`, ...
-4. **Total inference time across models:** `<ModelA>_total_inference_time_s`, `<ModelB>_total_inference_time_s`, ...
+4. **Total model time across models (load + infer + postprocess):** `<ModelA>_total_model_time_load_infer_post_s`, `<ModelB>_total_model_time_load_infer_post_s`, ...
 5. **Peak host RAM across models:** `<ModelA>_peak_ram_mb`, `<ModelB>_peak_ram_mb`, ...
 6. **Peak GPU VRAM across models:** `<ModelA>_peak_gpu_memory_mb`, `<ModelB>_peak_gpu_memory_mb`, ...
 
@@ -68,7 +68,7 @@ Running `merge_csvs.py` merges independent `results.csv` files horizontally into
 
 ## Running Tests
 
-Offline unit and end-to-end synthetic tests validate phase timing math (`total_inference_time_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), multi-RECIST zeroing, human-readable 18-column CSV trimming alongside full JSON receipts, final-only postprocessing, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and metric-grouped CSV merging:
+Offline unit and end-to-end synthetic tests validate phase timing math (`total_model_time_load_infer_post_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), multi-RECIST zeroing, human-readable 18-column CSV trimming alongside full JSON receipts, final-only postprocessing, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and metric-grouped CSV merging:
 
 ```bash
 uv pip install --python .venv-sam/bin/python pytest

@@ -164,7 +164,7 @@ def main() -> int:
             gpu_tolerance_mb=args.gpu_tolerance_mb,
         ) as profiler:
             try:
-                # 1. Model loading (counted in total_inference_time_s)
+                # 1. Model loading (counted in total_model_time_load_infer_post_s)
                 with profiler.phase("model_loading_time"):
                     overrides = (
                         []
@@ -178,7 +178,7 @@ def main() -> int:
                         hydra_overrides_extra=overrides,
                     )
 
-                # 2. Data load & decompression (excluded from total_inference_time_s)
+                # 2. Data load & decompression (excluded from total_model_time_load_infer_post_s)
                 with profiler.phase("data_loading_time"):
                     win_npz = resolve_window_npz(case_path, args.input_dir, window_dir)
                     with np.load(case_path, allow_pickle=False) as npz_data:
@@ -193,7 +193,7 @@ def main() -> int:
                     if img_3d.shape != recist.shape:
                         raise ValueError(f"Image shape {img_3d.shape} != RECIST shape {recist.shape}")
 
-                # 3. Resize + RGB + ImageNet norm + RECIST prompt extraction (excluded from total_inference_time_s)
+                # 3. Resize + RGB + ImageNet norm + RECIST prompt extraction (excluded from total_model_time_load_infer_post_s)
                 with profiler.phase("image_preprocessing_time"):
                     video_height, video_width = img_3d.shape[1], img_3d.shape[2]
                     if (video_height, video_width) != (IMAGE_SIZE, IMAGE_SIZE):
@@ -240,7 +240,7 @@ def main() -> int:
                     metadata=metadata,
                     scratch=args.scratch,
                 ) as writer:
-                    # 4. Pure model inference (counted in total_inference_time_s)
+                    # 4. Pure model inference (counted in total_model_time_load_infer_post_s)
                     with profiler.phase("model_inference_time"):
                         with torch.inference_mode():
                             for ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d in prepared_prompts:
@@ -271,7 +271,7 @@ def main() -> int:
                                     torch.cuda.synchronize(torch_device)
                                 profiler.record_lesion_time(ulab, time.perf_counter() - t_lesion)
 
-                    # 5. Final postprocess (counted in total_inference_time_s) + save final NPZ only
+                    # 5. Final postprocess (counted in total_model_time_load_infer_post_s) + save final NPZ only
                     receipt = finalize_and_save_predictions(
                         writer,
                         out_npz,
@@ -332,7 +332,7 @@ def main() -> int:
         m = record["metrics"]
         print(
             f"[{idx + 1}/{len(cases)}] {model_name} | {case_id} | {record['status']} | "
-            f"total_inference={m['total_inference_time_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
+            f"model_time={m['total_model_time_load_infer_post_s']:.3f}s | end_to_end={m['total_end_to_end_time_including_io_s']:.3f}s | "
             f"MaxRAM={m['MaxRAM_MB']:.1f}MB"
         )
 

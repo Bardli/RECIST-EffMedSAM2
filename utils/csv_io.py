@@ -17,14 +17,14 @@ RESULT_COLUMNS = [
     "dice_score",
     "ground_truth_volume_ml",
     "predicted_volume_ml",
-    "total_inference_time_s",
+    "total_model_time_load_infer_post_s",
     "model_loading_time_s",
     "model_inference_time_s",
     "postprocessing_time_s",
     "data_loading_time_s",
     "image_preprocessing_time_s",
     "output_saving_time_s",
-    "end_to_end_wall_time_including_io_s",
+    "total_end_to_end_time_including_io_s",
     "peak_ram_mb",
     "peak_gpu_memory_mb",
 ]
@@ -39,7 +39,7 @@ MERGED_SHARED_COLUMNS = [
 MERGED_METRIC_COLUMNS = [
     "dice_score",
     "predicted_volume_ml",
-    "total_inference_time_s",
+    "total_model_time_load_infer_post_s",
     "peak_ram_mb",
     "peak_gpu_memory_mb",
 ]
@@ -112,7 +112,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         case_data_s = float(metrics.get("data_loading_time_s") or 0.0)
         case_pre_s = float(metrics.get("image_preprocessing_time_s") or 0.0)
         case_save_s = float(metrics.get("output_saving_time_s") or 0.0)
-        case_wall_s = float(metrics.get("end_to_end_wall_time_including_io_s") or 0.0)
+        case_wall_s = float(metrics.get("total_end_to_end_time_including_io_s") or 0.0)
 
         peak_ram_mb = _fmt_float(metrics.get("MaxRAM_MB"), 1)
         peak_gpu_mb = _fmt_float(metrics.get("MaxGPU_Mem_MB"), 1)
@@ -131,14 +131,14 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dice_score": "",
                     "ground_truth_volume_ml": "",
                     "predicted_volume_ml": "",
-                    "total_inference_time_s": round(c_load + c_inf + c_post, 4),
+                    "total_model_time_load_infer_post_s": round(c_load + c_inf + c_post, 4),
                     "model_loading_time_s": c_load,
                     "model_inference_time_s": c_inf,
                     "postprocessing_time_s": c_post,
                     "data_loading_time_s": round(case_data_s, 4),
                     "image_preprocessing_time_s": round(case_pre_s, 4),
                     "output_saving_time_s": round(case_save_s, 4),
-                    "end_to_end_wall_time_including_io_s": round(case_wall_s, 4),
+                    "total_end_to_end_time_including_io_s": round(case_wall_s, 4),
                     "peak_ram_mb": peak_ram_mb,
                     "peak_gpu_memory_mb": peak_gpu_mb,
                 }
@@ -168,7 +168,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 row_inf_s = _lookup_lesion_time(lesion_inf_times, rid, gid, case_inf_s, is_first)
                 row_post_s = _lookup_lesion_time(lesion_post_times, rid, gid, case_post_s, is_first)
 
-            row_total_inf_s = round(row_load_s + row_inf_s + row_post_s, 4)
+            row_total_model_s = round(row_load_s + row_inf_s + row_post_s, 4)
 
             out_rows.append(
                 {
@@ -180,14 +180,14 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dice_score": round(float(r["dice"]), 4) if r.get("dice") is not None else "",
                     "ground_truth_volume_ml": gt_vol_ml,
                     "predicted_volume_ml": pred_vol_ml,
-                    "total_inference_time_s": row_total_inf_s,
+                    "total_model_time_load_infer_post_s": row_total_model_s,
                     "model_loading_time_s": row_load_s,
                     "model_inference_time_s": row_inf_s,
                     "postprocessing_time_s": row_post_s,
                     "data_loading_time_s": row_data_s,
                     "image_preprocessing_time_s": row_pre_s,
                     "output_saving_time_s": row_save_s,
-                    "end_to_end_wall_time_including_io_s": row_wall_s,
+                    "total_end_to_end_time_including_io_s": row_wall_s,
                     "peak_ram_mb": peak_ram_mb,
                     "peak_gpu_memory_mb": peak_gpu_mb,
                 }
@@ -270,9 +270,11 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
         ]
         case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in grp_rows}
         dices = [float(r["dice_score"]) for r in grp_rows if r.get("dice_score", "") not in ("", None)]
-        timed_rows = [r for r in grp_rows if r.get("total_inference_time_s", "") not in ("", None)]
+        timed_rows = [
+            r for r in grp_rows if r.get("total_model_time_load_infer_post_s", "") not in ("", None)
+        ]
         timed_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in timed_rows}
-        tot_times = [float(r["total_inference_time_s"]) for r in timed_rows]
+        tot_times = [float(r["total_model_time_load_infer_post_s"]) for r in timed_rows]
         rams = [float(r["peak_ram_mb"]) for r in grp_rows if r.get("peak_ram_mb", "") not in ("", None)]
         gpus = [float(r["peak_gpu_memory_mb"]) for r in grp_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
         summaries.append(
@@ -283,7 +285,7 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
                 "cases": len(case_keys),
                 "lesions": sum(1 for r in grp_rows if str(r.get("lesion_id", "")) != ""),
                 "mean_dice_score": round(mean(dices), 4) if dices else None,
-                "mean_case_total_inference_time_s": (
+                "mean_case_total_model_time_load_infer_post_s": (
                     round(sum(tot_times) / len(timed_cases), 4) if tot_times and timed_cases else None
                 ),
                 "max_peak_ram_mb": round(max(rams), 1) if rams else None,

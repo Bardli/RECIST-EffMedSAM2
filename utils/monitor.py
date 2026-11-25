@@ -358,7 +358,7 @@ def summarize_samples(
     model_load_s = float(timings.get("model_loading_time_s", 0.0))
     inference_s = float(timings.get("model_inference_time_s", 0.0))
     postprocess_s = float(timings.get("postprocessing_time_s", 0.0))
-    total_inference_time_s = model_load_s + inference_s + postprocess_s
+    total_model_time_load_infer_post_s = model_load_s + inference_s + postprocess_s
 
     sampled_ram_peak = max(samples.ram_mb) if samples.ram_mb else 0.0
     max_ram_mb = max(sampled_ram_peak, float(ru_maxrss_mb), float(ram_baseline_mb))
@@ -427,15 +427,15 @@ def summarize_samples(
         gpu_sanity_ok = bool(cuda_available and gpu_monitor_status in ("measured", "partial"))
 
     return {
-        "total_inference_time_s": round(total_inference_time_s, 6),
+        "total_model_time_load_infer_post_s": round(total_model_time_load_infer_post_s, 6),
         "model_loading_time_s": round(model_load_s, 6),
         "model_inference_time_s": round(inference_s, 6),
         "postprocessing_time_s": round(postprocess_s, 6),
         "data_loading_time_s": round(float(timings.get("data_loading_time_s", 0.0)), 6),
         "image_preprocessing_time_s": round(float(timings.get("image_preprocessing_time_s", 0.0)), 6),
         "output_saving_time_s": round(float(timings.get("output_saving_time_s", 0.0)), 6),
-        "end_to_end_wall_time_including_io_s": round(
-            float(timings.get("end_to_end_wall_time_including_io_s", 0.0)), 6
+        "total_end_to_end_time_including_io_s": round(
+            float(timings.get("total_end_to_end_time_including_io_s", 0.0)), 6
         ),
         "MaxRAM_MB": round(max_ram_mb, 3),
         "ram_baseline_mb": round(float(ram_baseline_mb), 3),
@@ -519,8 +519,8 @@ class CaseProfiler:
         if self._thread is not None:
             self._thread.join(timeout=5.0 * self.sample_interval + 2.0)
             self._thread = None
-        if "end_to_end_wall_time_including_io_s" not in self.timings:
-            self.timings["end_to_end_wall_time_including_io_s"] = time.perf_counter() - self._start_perf
+        if "total_end_to_end_time_including_io_s" not in self.timings:
+            self.timings["total_end_to_end_time_including_io_s"] = time.perf_counter() - self._start_perf
         self._sample_once()
         return self.samples
 
