@@ -1,15 +1,12 @@
-"""Moving-centroid XY disk clipping postprocessing for EffMedSAM2-Tiny predictions.
-
-Intersect each label's 2D mask on every slice with a slice-centered physical
-XY disk of radius = (RECIST prompt length mm) / 2. Lymph nodes may be marked
-exempt so their predictions pass through untouched.
-"""
+"""Moving-centroid XY disk clipping postprocessing (saves final predictions only)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from .storage import IndependentPredictionWriter
 
 
 def _svd_recist_endpoints_xy(
@@ -135,105 +132,6 @@ def xy_centroid_clip_channel(
     return out, row
 
 
-def xy_centroid_clip(
-    pred: np.ndarray,
-    recist: np.ndarray,
-    spacing: np.ndarray,
-    endpoints: dict[int, dict],
-    reporting_buckets: dict[int, str],
-) -> tuple[np.ndarray, list[dict], list[dict]]:
-    """Intersect each label in a 3D label map with a slice-centered physical XY disk."""
-    if pred.ndim != 3 or pred.shape != recist.shape:
-        raise ValueError("original ZYX grids must match")
-    if pred.dtype.kind not in "ui" or recist.dtype.kind not in "ui" or pred.min() < 0 or recist.min() < 0:
-        raise ValueError("nonnegative integer labels required")
-    sp = np.asarray(spacing).ravel()
-    if len(sp) != 3 or not np.all(np.isfinite(sp)) or np.any(sp <= 0):
-        raise ValueError("positive XYZ spacing required")
-
-    out = pred.copy()
-    records: list[dict] = []
-    curves: list[dict] = []
-    yy, xx = np.ogrid[: pred.shape[1], : pred.shape[2]]
-    labels = sorted((set(map(int, np.unique(pred))) | set(map(int, np.unique(recist)))) - {0})
-
-    for lab in labels:
-        row = dict(
-            label=lab,
-            reporting_bucket=reporting_buckets.get(lab, ""),
-            seed_z="",
-            prompt_center_x="",
-            prompt_center_y="",
-            radius_mm="",
-            prompt_length_mm="",
-            endpoint_source="",
-            prompt_axis="",
-            status="ok",
-            action="preserved",
-            removed_voxels=0,
-            affected_slices=0,
-        )
-        radius = None
-        if lab not in reporting_buckets:
-            row["status"] = "missing_reporting_bucket"
-        elif reporting_buckets[lab] == "lymph_node":
-            row["action"] = "exempt_lymph_node"
-        else:
-            seeds = [z for z, s in enumerate(recist) if np.any(s == lab)]
-            if len(seeds) != 1:
-                row["status"] = "missing_recist" if not seeds else "multiple_recist_slices"
-            elif lab not in endpoints:
-                row["status"] = "missing_saved_endpoints"
-            else:
-                z0 = seeds[0]
-                row["seed_z"] = z0
-                endpoint = endpoints[lab]
-                row["endpoint_source"] = endpoint["source"]
-                row["prompt_axis"] = endpoint["axis"]
-                try:
-                    length = prompt_length(recist, lab, z0, sp, endpoint)
-                except ValueError as exc:
-                    row["status"] = str(exc)
-                else:
-                    center = np.asarray(endpoint["points"], dtype=float).mean(axis=0)
-                    radius = length / 2
-                    row.update(
-                        prompt_center_x=float(center[0]),
-                        prompt_center_y=float(center[1]),
-                        radius_mm=radius,
-                        prompt_length_mm=length,
-                        action="xy_centroid_clip",
-                    )
-
-        for z in range(len(pred)):
-            original = pred[z] == lab
-            before = int(original.sum())
-            cx = cy = ""
-            if radius is not None and before:
-                ys, xs = np.nonzero(original)
-                cx, cy = float(xs.mean()), float(ys.mean())
-                distance2 = ((xx - cx) * sp[0]) ** 2 + ((yy - cy) * sp[1]) ** 2
-                allowed = distance2 <= radius**2 + 1e-9 * max(1.0, radius**2)
-                out[z][original & ~allowed] = 0
-            after = int(np.count_nonzero(out[z] == lab))
-            row["removed_voxels"] += before - after
-            row["affected_slices"] += int(after < before)
-            curves.append(
-                dict(
-                    label=lab,
-                    z=z,
-                    area_before=before,
-                    area_after=after,
-                    removed_voxels=before - after,
-                    center_x=cx,
-                    center_y=cy,
-                    radius_mm=radius if radius is not None else "",
-                )
-            )
-        records.append(row)
-    return out, records, curves
-
-
 def apply_moving_centroid_to_channels(
     segs_nzyx: np.ndarray,
     instance_ids: list[int],
@@ -264,17 +162,13 @@ def apply_moving_centroid_to_channels(
 
 
 def apply_moving_centroid_to_writer(
-    writer,
+    writer: IndependentPredictionWriter,
     *,
     scratch: str | Path | None = None,
     endpoints: dict[int, dict] | None = None,
     exempt_ids: set[int] | None = None,
-):
-    """Apply moving-centroid clipping directly from an ``IndependentPredictionWriter``'s
-    disk-backed channels into a new ``IndependentPredictionWriter`` without NPZ reload.
-    """
-    from ..storage import IndependentPredictionWriter
-
+) -> tuple[IndependentPredictionWriter, list[dict]]:
+    """Apply moving-centroid clipping directly from disk-backed channels without NPZ reload."""
     endpoints = endpoints or {}
     exempt_ids = exempt_ids or set()
     post_meta = {**writer.metadata, "postprocess": "moving_centroid"}
@@ -320,63 +214,30 @@ def apply_moving_centroid_to_writer(
     return post_writer, actions
 
 
-def build_postprocessed_rows(
-    post_receipt: dict,
-    post_actions: list[dict],
-) -> list[dict]:
-    """Pair ``IndependentPredictionWriter.save()`` receipt rows with clip actions."""
-    action_by_id = {int(a["label"]): a for a in post_actions}
-    rows: list[dict] = []
-    for r in post_receipt.get("rows", []):
-        lab = int(r["gt_id"])
-        act = action_by_id.get(lab, {})
-        rows.append(
-            dict(
-                gt_id=lab,
-                post_pred_voxels=r.get("pred_voxels"),
-                post_intersection=r.get("intersection"),
-                post_dice=r.get("dice"),
-                post_action=act.get("action", ""),
-                post_removed_voxels=act.get("removed_voxels", 0),
-            )
-        )
-    return rows
-
-
 def finalize_and_save_predictions(
-    writer,
+    writer: IndependentPredictionWriter,
     output_npz: str | Path,
     *,
     profiler,
     postprocess: str = "none",
     overwrite: bool = False,
     scratch: str | Path | None = None,
-) -> tuple[dict, Path | None, list[dict]]:
-    """Run optional postprocessing and save raw (+ postprocessed) NPZs inside ``profiler``."""
-    post_writer = None
-    post_actions: list[dict] = []
+) -> dict:
+    """Optionally apply postprocessing inside ``profiler`` and save ONLY the final prediction NPZ."""
+    post_writer: IndependentPredictionWriter | None = None
     try:
         if postprocess == "moving_centroid":
-            with profiler.phase("postprocess"):
-                post_writer, post_actions = apply_moving_centroid_to_writer(
-                    writer,
-                    scratch=scratch,
-                )
-        elif postprocess != "none":
+            with profiler.phase("postprocessing_time"):
+                post_writer, _ = apply_moving_centroid_to_writer(writer, scratch=scratch)
+            final_writer = post_writer
+        elif postprocess == "none":
+            final_writer = writer
+        else:
             raise ValueError(f"Unsupported postprocess mode: {postprocess!r}")
 
-        with profiler.phase("save"):
-            receipt = writer.save(output_npz, overwrite=overwrite)
-            post_npz: Path | None = None
-            post_rows: list[dict] = []
-            if post_writer is not None:
-                out_p = Path(output_npz)
-                post_npz = out_p.parent.parent / "predictions_postprocessed" / out_p.name
-                post_receipt = post_writer.save(post_npz, overwrite=overwrite)
-                post_rows = build_postprocessed_rows(post_receipt, post_actions)
-        return receipt, post_npz, post_rows
+        with profiler.phase("output_saving_time"):
+            receipt = final_writer.save(output_npz, overwrite=overwrite)
+        return receipt
     finally:
         if post_writer is not None:
             post_writer.close()
-
-

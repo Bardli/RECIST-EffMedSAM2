@@ -1,8 +1,8 @@
 # RECIST-EffMedSAM2
 
-A clean, standalone inference and efficiency-benchmarking suite for **3D CT lesion segmentation from 2D RECIST annotations** across **RECIST-EffMedSAM2**, **MedSAM2**, and **nnInteractive** — designed for effortless CPU/GPU reproduction in native Python without private containers.
+A clean, standalone inference and efficiency-benchmarking repository for **3D CT lesion segmentation from 2D RECIST annotations** across **EffMedSAM2**, **MedSAM2**, and **nnInteractive** — organized as simple standalone Python scripts (`infer_effmedsam2.py`, `infer_medsam2.py`, `infer_nninteractive.py`, and `merge_csvs.py`) with no package installation or wrapper shell layers required.
 
-*Prefer letting an AI coding agent handle the setup?* Open the cloned folder in your agent and tell it to follow [`SKILL.md`](SKILL.md) — it will create the virtual environments, download and verify checkpoints, run a 1-case smoke test, and check the output CSVs for you.
+*Prefer letting an AI coding agent handle the setup?* Open the cloned folder in your agent and tell it to follow [`SKILL.md`](SKILL.md) — it will create the virtual environments, download and verify checkpoints, run a 1-case smoke test, and audit the output CSVs for you.
 
 ---
 
@@ -10,12 +10,10 @@ A clean, standalone inference and efficiency-benchmarking suite for **3D CT lesi
 
 **Install only what you need:**
 
-- **`.venv-sam`** — for **RECIST-EffMedSAM2** and **MedSAM2**.
-- **`.venv-nn`** — for **nnInteractive** (`box`, `point`, and `scribble`).
+- **`.venv-sam`** — for **`infer_effmedsam2.py`** and **`infer_medsam2.py`**.
+- **`.venv-nn`** — for **`infer_nninteractive.py`**.
 
-Both `requirements/sam.txt` and `requirements/nninteractive.txt` already include the core runner, profiler, and evaluator dependencies (`requirements/core.txt`), so no separate base environment is required.
-
-We use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`uv venv` + `uv pip`) for fast environment setup and automatic Python 3.11 management *(standard `python3 -m venv` + `pip` remains compatible with all `requirements/*.txt` files on offline/HPC systems without `uv`)*.
+We use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`uv venv` + `uv pip`) for fast environment setup and automatic Python 3.11 management *(standard `python3 -m venv` + `pip` remains compatible with all `requirements/*.txt` files on offline/HPC systems without `uv`)*. Both `requirements/sam.txt` and `requirements/nninteractive.txt` include `requirements/core.txt`, and every script imports directly from the repository root (`utils/`), so no `pip install -e .` is needed.
 
 First clone the repository:
 
@@ -27,7 +25,7 @@ cd RECIST-EffMedSAM2
 > [!NOTE]
 > For GPU environments, pick the PyTorch install command matching your CUDA driver on the [PyTorch homepage](https://pytorch.org/get-started/locally/) before installing the remaining packages below.
 
-##### Option A — SAM / RECIST-EffMedSAM2 environment (`.venv-sam`)
+##### Option A — SAM / EffMedSAM2 environment (`.venv-sam`)
 
 ```bash
 uv venv --python 3.11 .venv-sam
@@ -45,8 +43,6 @@ SAM2_BUILD_CUDA=0 uv pip install --python .venv-sam/bin/python --no-build-isolat
 # git clone https://github.com/Bardli/MedSAM2.git .venv-sam/src/MedSAM2
 # git -C .venv-sam/src/MedSAM2 checkout --detach 333419e40353e55f4e4b191cb6cd3a238bd0b180
 # uv pip install --python .venv-sam/bin/python --no-build-isolation -e .venv-sam/src/MedSAM2
-
-uv pip install --python .venv-sam/bin/python -e . --no-deps
 ```
 
 ##### Option B — nnInteractive environment (`.venv-nn`)
@@ -57,7 +53,6 @@ uv venv --python 3.11 .venv-nn
 # Use --index-url https://download.pytorch.org/whl/cpu for CPU-only, or your CUDA wheel for GPU:
 uv pip install --python .venv-nn/bin/python torch torchvision
 uv pip install --python .venv-nn/bin/python -r requirements/nninteractive.txt
-uv pip install --python .venv-nn/bin/python -e . --no-deps
 ```
 
 ---
@@ -72,19 +67,19 @@ Download the public `MedSAM2` RECIST checkpoint and `nnInteractive_v1.0` checkpo
 bash scripts/download_weights.sh        # defaults to ./assets (or pass a custom path)
 ```
 
-Place the `RECIST-EffTiny-m8` checkpoint at `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and optionally `RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` if running `--model-scope all-six`). Passing `--verify-sha256` checks every file hash automatically before inference starts.
+Place the `RECIST-EffTiny-m8` checkpoint at `assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt` (and optionally `assets/RECIST-EffSmall-m8/checkpoints/checkpoint_40.pt` for `--model-size small`).
 
 ### 2. Prepare input NPZs
 
-By default, all inference scripts use repository-relative folders (all ignored by `.gitignore`):
+By default, every script reads and writes relative to the repository root (all ignored by `.gitignore`):
 
 ```text
 RECIST-EffMedSAM2/
 ├── data/
-│   ├── inputs/           # place your case *.npz files here
-│   └── window_twins/     # optional separate pre-windowed SAM twins
-├── assets/               # downloaded checkpoints
-└── runs/                 # predictions, metrics, plots, and summary CSVs
+│   ├── inputs/           # default --input-dir (*.npz)
+│   └── window_twins/     # optional pre-windowed twins for EffMedSAM2 / MedSAM2
+├── assets/               # checkpoints
+└── runs/                 # per-model predictions, metrics JSONs, plots, and CSVs
 ```
 
 Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
@@ -94,83 +89,72 @@ Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
 - `gts` *(optional)*: integer `(Z, Y, X)` ground-truth mask for Dice and volume evaluation.
 
 > [!IMPORTANT]
-> **Do not quantize raw HU images down to `uint8` if full precision is desired:**
+> **Keep CT intensities at full precision whenever possible:**
 > - **`nnInteractive`** expects raw unwindowed Hounsfield Units (passed straight through as `float32`).
-> - **`RECIST-EffMedSAM2` & `MedSAM2`** window HU volumes continuously in `float32` (`L40/W400`) and keep `float32` inputs at full precision through bilinear resizing (legacy `uint8` twins remain supported for backward compatibility).
+> - **`EffMedSAM2` & `MedSAM2`** window HU volumes continuously in `float32` (`L40/W400`) and resize `float32` inputs via bilinear `cv2.resize` without `uint8` truncation (legacy `uint8` twins remain supported for compatibility).
 
-### 3. Run inference
+### 3. Run inference & merge CSVs
 
-Run any method directly with a single Python command (auto-detects `data/inputs/`, `data/window_twins/`, `assets/`, `.venv-sam/`, and `.venv-nn/`, reloads the model fresh per case, profiles CPU/RAM/GPU usage, and writes summary CSVs to `runs/benchmark/`):
+Each model has one standalone Python script that reloads the model fresh per case, runs serial single-threaded inference (`--num-threads 1`) by default, records explicit per-phase timings and RAM/GPU telemetry, saves final prediction NPZs, and writes independent `case_metrics.csv` and `lesion_scores.csv` files:
 
 ```bash
-# 1) RECIST-EffMedSAM2 (pass --limit 1 for a fast single-case check)
-.venv-sam/bin/python -m recist_effmedsam2 --models efftiny_m8_ep40_box --verify-sha256 --plots
+# 1) RECIST-EffMedSAM2 (outputs runs/EffMedSAM2/{case_metrics,lesion_scores}.csv)
+.venv-sam/bin/python infer_effmedsam2.py -i data/inputs -o runs/EffMedSAM2 --device cpu --plots
 
-# 2) MedSAM2
-.venv-sam/bin/python -m recist_effmedsam2 --models medsam2_box --verify-sha256 --plots
+# 2) MedSAM2 (outputs runs/MedSAM2/{case_metrics,lesion_scores}.csv)
+.venv-sam/bin/python infer_medsam2.py -i data/inputs -o runs/MedSAM2 --device cpu --plots
 
-# 3) nnInteractive (box, 3-point, and scribble; or pass a single model ID)
-.venv-nn/bin/python -m recist_effmedsam2 --models nninteractive_box_hu nninteractive_3pt_25_hu nninteractive_line_skel_in3_hu --verify-sha256 --plots
+# 3) nnInteractive (box, 3-point, or scribble)
+.venv-nn/bin/python infer_nninteractive.py -i data/inputs -o runs/nnInteractive_box --prompt-mode box --device cpu --plots
+.venv-nn/bin/python infer_nninteractive.py -i data/inputs -o runs/nnInteractive_point --prompt-mode 3pt_25 --device cpu --plots
+.venv-nn/bin/python infer_nninteractive.py -i data/inputs -o runs/nnInteractive_scribble --prompt-mode line --device cpu --plots
 ```
 
-Common flags work identically across all three methods:
+Finally, merge the per-model CSVs horizontally into model-prefixed comparison tables (`merged_case_metrics.csv`, `merged_lesion_scores.csv`, and `model_summary.csv`):
 
 ```bash
-# Run on physical GPU 2 or enable moving-centroid postprocessing:
-.venv-sam/bin/python -m recist_effmedsam2 --models efftiny_m8_ep40_box --device cuda --gpu-index 2 --postprocess moving_centroid --verify-sha256 --plots
-.venv-nn/bin/python -m recist_effmedsam2 --models nninteractive_box_hu --device cuda --gpu-index 0 --verify-sha256 --plots
-```
-
-To run the entire 5-model benchmark in one sweep and generate combined comparison tables:
-
-```bash
-.venv-sam/bin/python -m recist_effmedsam2 --verify-sha256 --plots
+.venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged
 ```
 
 <details>
-<summary>Custom paths & standalone single-case backend CLIs</summary>
+<summary>Common options: GPU execution, smoke tests, custom paths, and Small variant</summary>
 
 ```bash
-# Explicit input/output/window-twin folders (adds --recursive for nested cancer subfolders)
-.venv-sam/bin/python -m recist_effmedsam2 \
-  --models efftiny_m8_ep40_box \
-  --input-dir /path/to/hu_inputs \
+# Fast 1-case smoke test on physical GPU 2
+.venv-sam/bin/python infer_effmedsam2.py -i data/inputs -o runs/eff_smoke --device cuda --gpu-index 2 --limit 1 --plots
+
+# Custom dataset root with nested folders + pre-windowed companion dir
+.venv-sam/bin/python infer_effmedsam2.py \
+  -i /path/to/hu_inputs \
   --window-dir /path/to/window_twins \
-  --output-dir runs/effmedsam2_cohort \
+  -o runs/eff_cohort \
   --recursive \
   --postprocess moving_centroid \
-  --verify-sha256 \
   --plots
 
-# Run Small variant instead of Tiny
-.venv-sam/bin/python -m recist_effmedsam2 --models effsmall_m8_ep40_box --verify-sha256 --plots
+# EffMedSAM2-Small variant (disables moving-centroid postprocessing with --postprocess none if desired)
+.venv-sam/bin/python infer_effmedsam2.py --model-size small -i data/inputs -o runs/EffMedSAM2_small
 
-# Single-process Python backend CLIs (without the outer benchmark coordinator)
-.venv-sam/bin/recist-sam-infer -i /path/to/case.npz -o runs/sam_single \
-  --backend eff --model-size tiny --weights assets/RECIST-EffTiny-m8/checkpoints/checkpoint_40.pt \
-  --device cpu --num-threads 1 --prompt box --postprocess moving_centroid --disable-image-encoder-compile
-
-.venv-nn/bin/recist-nninteractive-infer -i /path/to/case.npz -o runs/nn_single \
-  --checkpoint assets/nninteractive_hf_models/models/nnInteractive_v1.0 \
-  --device cpu --num-threads 1 --prompt-mode 3pt_25 --interaction batch
+# Auto-discover all model folders under runs/ when merging
+.venv-sam/bin/python merge_csvs.py --runs-dir runs -o runs/merged
 ```
 
 </details>
 
-For runtime/memory metric definitions, output CSV schemas, `recist-eval`, and offline `pytest` verification, see [`docs/metrics_and_evaluation.md`](docs/metrics_and_evaluation.md).
+For runtime/memory column definitions, merged CSV layout, and offline `pytest` verification, see [`docs/metrics_and_evaluation.md`](docs/metrics_and_evaluation.md).
 
 ---
 
 ## Supported Model Configurations
 
-| Model Family | Prompt Derived from RECIST | Model ID (`configs/models.json`) | Scope |
+| Model Name (CSV Prefix) | Script | Prompt Derived from RECIST | Postprocessing |
 |---|---|---|---|
-| **RECIST-EffMedSAM2** (Tiny m8, ep40) | Square box from SVD diameter | `efftiny_m8_ep40_box` | Paper (5 configs) |
-| **MedSAM2** | Square box from SVD diameter | `medsam2_box` | Paper (5 configs) |
-| **nnInteractive-box** | 2D box on RECIST slice | `nninteractive_box_hu` | Paper (5 configs) |
-| **nnInteractive-point** | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
-| **nnInteractive-scribble** | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
-| EfficientMedSAM2-Small (Small m8, ep40) | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
+| `EffMedSAM2` | [`infer_effmedsam2.py`](infer_effmedsam2.py) | Square box from SVD diameter (Z-slab `1.6x`) | `moving_centroid` (default) |
+| `MedSAM2` | [`infer_medsam2.py`](infer_medsam2.py) | Square box from SVD diameter (full Z-volume) | None |
+| `nnInteractive_box` | [`infer_nninteractive.py`](infer_nninteractive.py) | 2D box on RECIST slice (`--prompt-mode box`) | None |
+| `nnInteractive_point` | [`infer_nninteractive.py`](infer_nninteractive.py) | 3 points center-out 25% (`--prompt-mode 3pt_25`) | None |
+| `nnInteractive_scribble` | [`infer_nninteractive.py`](infer_nninteractive.py) | Skeletonized line inset 3 px (`--prompt-mode line`) | None |
+| `EffMedSAM2_small` | [`infer_effmedsam2.py`](infer_effmedsam2.py) (`--model-size small`) | Square box from SVD diameter (Z-slab `1.6x`) | `moving_centroid` (configurable) |
 
 ---
 

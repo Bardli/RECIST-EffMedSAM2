@@ -2,7 +2,7 @@
 
 
 def reset_cuda_peaks(device) -> None:
-    """Initialize CUDA in a fresh worker before resetting allocator counters."""
+    """Initialize CUDA before resetting allocator counters."""
     if device.type == "cuda":
         import torch
 

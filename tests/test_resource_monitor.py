@@ -1,21 +1,21 @@
-"""Tests for embedded FLARE-Efficiency resource monitor, phase breakdown, and GPU target mapping."""
+"""Tests for embedded FLARE-Efficiency resource monitor, clear phase timings, and GPU mapping."""
 from __future__ import annotations
 
-import time
 from pathlib import Path
+import time
 
 import numpy as np
 
-from recist_effmedsam2.profiling.monitor import (
+from utils.monitor import (
     CaseProfiler,
     PidGpuSampler,
     Samples,
     get_process_max_rss_mb,
+    plot_case,
     ranking_gpu_memory,
     resolve_physical_gpu_targets,
     summarize_samples,
 )
-from recist_effmedsam2.profiling.report import plot_case
 
 
 def test_summarize_samples_math_and_cpu_sanity():
@@ -27,13 +27,13 @@ def test_summarize_samples_math_and_cpu_sanity():
         gpu_mb=[0.0, 0.0, 0.0],
     )
     timings = {
-        "model_load_s": 0.4,
-        "inference_s": 1.2,
-        "postprocess_s": 0.25,
-        "data_load_s": 0.3,
-        "preprocess_s": 0.2,
-        "save_s": 0.1,
-        "wall_total_s": 2.45,
+        "model_loading_time_s": 0.4,
+        "model_inference_time_s": 1.2,
+        "postprocessing_time_s": 0.25,
+        "data_loading_time_s": 0.3,
+        "image_preprocessing_time_s": 0.2,
+        "output_saving_time_s": 0.1,
+        "end_to_end_wall_time_including_io_s": 2.45,
     }
     m = summarize_samples(
         samples,
@@ -51,10 +51,11 @@ def test_summarize_samples_math_and_cpu_sanity():
         gpu_monitor_status="measured",
         gpu_monitor_backend="pynvml",
     )
-    assert np.isclose(m["runtime_s"], 1.85)
-    assert np.isclose(m["model_load_s"], 0.4)
-    assert np.isclose(m["inference_s"], 1.2)
-    assert np.isclose(m["postprocess_s"], 0.25)
+    assert np.isclose(m["total_runtime_s"], 1.85)
+    assert np.isclose(m["model_loading_time_s"], 0.4)
+    assert np.isclose(m["model_inference_time_s"], 1.2)
+    assert np.isclose(m["postprocessing_time_s"], 0.25)
+    assert np.isclose(m["end_to_end_wall_time_including_io_s"], 2.45)
     assert m["MaxRAM_MB"] == 210.0
     assert m["ram_inference_peak_mb"] == 200.0
     assert m["ram_delta_mb"] == 120.0
@@ -79,7 +80,7 @@ def test_gpu_unmeasured_vs_zero_and_sanity():
     )
     m_unavail = summarize_samples(
         unmeasured_samples,
-        {"model_load_s": 0.1, "inference_s": 0.9},
+        {"model_loading_time_s": 0.1, "model_inference_time_s": 0.9},
         device="cpu",
         gpu_monitor_status="unavailable",
         gpu_monitor_backend="none",
@@ -92,7 +93,7 @@ def test_gpu_unmeasured_vs_zero_and_sanity():
 
     m_failed = summarize_samples(
         unmeasured_samples,
-        {"model_load_s": 0.1, "inference_s": 0.9},
+        {"model_loading_time_s": 0.1, "model_inference_time_s": 0.9},
         device="cpu",
         gpu_monitor_status="query_failed",
         gpu_monitor_backend="pynvml",
@@ -101,7 +102,6 @@ def test_gpu_unmeasured_vs_zero_and_sanity():
     assert m_failed["MaxGPU_Mem_MB"] is None
     assert m_failed["gpu_sanity_ok"] is False
 
-    # Verify PidGpuSampler returns None (not 0.0) when backend is 'none'
     sampler = PidGpuSampler.__new__(PidGpuSampler)
     sampler.gpu_targets = None
     sampler.backend = "none"
@@ -130,35 +130,35 @@ def test_resolve_physical_gpu_targets():
 
 def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     with CaseProfiler(device="cpu", sample_interval=0.03) as prof:
-        with prof.phase("model_load"):
+        with prof.phase("model_loading_time"):
             buf = np.ones((512, 512), dtype=np.float32)
             time.sleep(0.04)
-        with prof.phase("data_load"):
+        with prof.phase("data_loading_time"):
             time.sleep(0.02)
-        with prof.phase("preprocess"):
+        with prof.phase("image_preprocessing_time"):
             time.sleep(0.02)
-        with prof.phase("inference"):
+        with prof.phase("model_inference_time"):
             time.sleep(0.05)
             prof.record_lesion_time(1, 0.045)
-        with prof.phase("postprocess"):
+        with prof.phase("postprocessing_time"):
             time.sleep(0.03)
-        with prof.phase("save"):
+        with prof.phase("output_saving_time"):
             time.sleep(0.02)
         del buf
-        record = prof.finalize(extra_metadata={"case_id": "synth_01", "model": "unit_test"})
+        record = prof.finalize(extra_metadata={"case_id": "synth_01", "model_name": "EffMedSAM2"})
 
     m = record["metrics"]
     assert get_process_max_rss_mb() > 0.0
     assert m["MaxRAM_MB"] > 0.0
     assert m["ram_inference_peak_mb"] > 0.0
-    assert m["postprocess_s"] >= 0.02
+    assert m["postprocessing_time_s"] >= 0.02
     assert np.isclose(
-        m["runtime_s"],
-        m["model_load_s"] + m["inference_s"] + m["postprocess_s"],
+        m["total_runtime_s"],
+        m["model_loading_time_s"] + m["model_inference_time_s"] + m["postprocessing_time_s"],
         atol=1e-5,
     )
-    assert m["wall_total_s"] > m["runtime_s"]
-    assert "postprocess" in record["phase_spans"]
+    assert m["end_to_end_wall_time_including_io_s"] > m["total_runtime_s"]
+    assert "postprocessing_time" in record["phase_spans"]
     if m["gpu_monitor_status"] == "measured":
         assert m["MaxGPU_Mem_MB"] == 0.0
         assert m["gpu_nvml_peak_mb"] == 0.0
@@ -169,7 +169,6 @@ def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     for p in plots:
         assert p.is_file() and p.stat().st_size > 0
 
-    # Ensure plot_case safely handles all-None gpu_mb without error
     rec_no_gpu = dict(record)
     rec_no_gpu["samples"] = dict(record["samples"], gpu_mb=[None] * len(record["samples"]["seconds"]))
     plots2 = plot_case(rec_no_gpu, tmp_path / "plots_nogpu")

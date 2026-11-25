@@ -1,0 +1,73 @@
+"""Merge per-model CSVs horizontally into wide model-prefixed comparison tables."""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+from utils.csv_io import merge_model_csvs
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "-i",
+        "--inputs",
+        nargs="+",
+        type=Path,
+        default=None,
+        help="Per-model output directories (or direct CSV paths) to merge",
+    )
+    ap.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Scan a parent runs directory for model folders containing case_metrics.csv / lesion_scores.csv",
+    )
+    ap.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=Path("runs/merged"),
+        help="Output folder for merged CSVs (default: runs/merged)",
+    )
+    return ap
+
+
+def _discover_run_subdirs(runs_dir: Path) -> list[Path]:
+    skip = {"merged", "reports", "logs", "scratch"}
+    dirs = [
+        p
+        for p in sorted(runs_dir.iterdir())
+        if p.is_dir()
+        and p.name not in skip
+        and not p.name.startswith("merged")
+        and ((p / "case_metrics.csv").is_file() or (p / "lesion_scores.csv").is_file())
+    ]
+    if not dirs:
+        raise FileNotFoundError(f"No model CSV folders found under {runs_dir}")
+    return dirs
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    inputs: list[Path] = []
+    if args.inputs:
+        inputs.extend(args.inputs)
+    if args.runs_dir is not None:
+        inputs.extend(_discover_run_subdirs(args.runs_dir))
+    if not inputs:
+        default_runs = Path("runs")
+        if default_runs.is_dir():
+            inputs = _discover_run_subdirs(default_runs)
+        else:
+            raise SystemExit("Pass -i/--inputs <model_dir...> or --runs-dir <runs_root>.")
+
+    written = merge_model_csvs(inputs, args.output_dir)
+    for key, path in written.items():
+        print(f"Wrote {key}: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

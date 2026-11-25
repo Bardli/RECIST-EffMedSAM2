@@ -1,5 +1,6 @@
 """Real CUDA test: run in a fresh interpreter, never after a fixture warms CUDA."""
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -7,15 +8,17 @@ import pytest
 
 
 def test_real_cuda_cold_start():
-    script = """
+    repo_root = Path(__file__).resolve().parents[1]
+    script = f"""
 import sys
+sys.path.insert(0, {str(repo_root)!r})
 try:
     import torch
 except ModuleNotFoundError as exc:
     if exc.name != "torch":
         raise
     sys.exit(77)
-from recist_effmedsam2.backends.device_memory import reset_cuda_peaks
+from utils.device_memory import reset_cuda_peaks
 assert not torch.cuda.is_initialized(), "worker already warmed CUDA"
 reset_cuda_peaks(torch.device("cpu"))
 assert not torch.cuda.is_initialized(), "CPU path initialized CUDA"
@@ -31,8 +34,13 @@ torch.cuda.synchronize(dev)
 assert torch.cuda.max_memory_allocated(dev) >= baseline + tensor.numel() * tensor.element_size()
 print("cold-start CUDA validated:", torch.__version__, torch.cuda.get_device_name(dev))
 """
-    result = subprocess.run([sys.executable, "-c", script], text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+    )
     if result.returncode == 77 and os.getenv("RECIST_REQUIRE_CUDA") != "1":
         pytest.skip("requires a CUDA-capable PyTorch environment and an allocated NVIDIA GPU")
     assert result.returncode == 0, f"CUDA cold-start test failed (rc={result.returncode}): {result.stdout}"

@@ -7,16 +7,15 @@ import cv2
 import numpy as np
 import pytest
 
-from recist_effmedsam2.backends.sam_infer import (
-    recist_bbox,
-    recist_endpoints,
-    recist_points_at,
+from utils.ct_inputs import (
+    abdomen_image,
+    nninteractive_image,
+    raw_hu,
     resize_grayscale_to_rgb_and_resize,
 )
-from recist_effmedsam2.ct_inputs import abdomen_image, nninteractive_image, raw_hu
-from recist_effmedsam2.postprocess import apply_moving_centroid_to_channels
-from recist_effmedsam2.prompts import points_for_mode, scribble_plane
-from recist_effmedsam2.storage import IndependentPredictionWriter, load_independent_prediction
+from utils.postprocess import apply_moving_centroid_to_channels
+from utils.prompts import get_diameter_bbox, points_for_mode, recist_bbox, recist_endpoints, scribble_plane
+from utils.storage import IndependentPredictionWriter, load_independent_prediction
 
 
 def test_ct_inputs_raw_hu_and_windowing():
@@ -103,15 +102,16 @@ def test_recist_prompts_and_scribble():
     assert 28.5 <= diameter <= 31.5  # true 30px line after 2px cap removal
 
     box = recist_bbox(plane)
+    nn_box = get_diameter_bbox(plane)
     assert box[0] < box[2] and box[1] < box[3]
+    assert nn_box[0] < nn_box[2] and nn_box[1] < nn_box[3]
 
-    sam_pts = recist_points_at(plane, (25.0, 50.0, 75.0))
-    nn_pts = points_for_mode(plane, "3pt_25")
-    assert sam_pts.shape == (3, 2)
-    assert nn_pts.shape == (3, 2)
-    # Midpoint (index 0) near (31, 32)
-    assert abs(float(sam_pts[0, 0]) - 31.0) <= 1.0
-    assert abs(float(nn_pts[0, 0]) - 31.0) <= 1.0
+    pts_3 = points_for_mode(plane, "3pt_25")
+    pts_5 = points_for_mode(plane, "5pt_10_90")
+    assert pts_3.shape == (3, 2)
+    assert pts_5.shape == (5, 2)
+    assert abs(float(pts_3[0, 0]) - 31.0) <= 1.0
+    assert abs(float(pts_5[0, 0]) - 31.0) <= 1.0
 
     scrib = scribble_plane(plane, thickness=[1, 2, 2], stroke="skeleton", inset=3)
     assert scrib.dtype == bool
@@ -124,7 +124,7 @@ def test_independent_storage_overlap_empty_and_postprocess(tmp_path: Path):
     recist = np.zeros(shape, dtype=np.uint16)
     spacing = np.array([1.0, 1.0, 2.0], dtype=np.float32)
 
-    # Label 2: predicted overlapping with 5
+    # Label 2: overlapping candidate ID with 5
     gt[2:4, 6:14, 6:14] = 2
     cv2.line(recist[3], (6, 10), (13, 10), 2, thickness=2)
 
@@ -160,7 +160,6 @@ def test_independent_storage_overlap_empty_and_postprocess(tmp_path: Path):
     assert loaded["instance_ids"] == [2, 5, 9]
     assert loaded["prediction_status"] == ["predicted", "predicted_empty", "no_recist"]
 
-    # Moving-centroid clip should remove the distant false positive on slice 2 for label 2
     clipped, actions = apply_moving_centroid_to_channels(
         loaded["segs"],
         loaded["instance_ids"],
