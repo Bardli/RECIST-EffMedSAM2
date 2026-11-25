@@ -12,17 +12,11 @@ RESULT_COLUMNS = [
     "dataset",
     "case_id",
     "lesion_id",
-    "recist_id",
     "model_name",
     "device",
-    "postprocess",
-    "case_status",
-    "prediction_status",
-    "ground_truth_voxels",
-    "ground_truth_volume_ml",
-    "predicted_voxels",
-    "predicted_volume_ml",
     "dice_score",
+    "ground_truth_volume_ml",
+    "predicted_volume_ml",
     "total_inference_time_s",
     "model_loading_time_s",
     "model_inference_time_s",
@@ -32,18 +26,13 @@ RESULT_COLUMNS = [
     "output_saving_time_s",
     "end_to_end_wall_time_including_io_s",
     "peak_ram_mb",
-    "peak_cpu_utilization_pct",
     "peak_gpu_memory_mb",
-    "gpu_monitor_status",
-    "gpu_sanity_ok",
-    "error_message",
 ]
 
 MERGED_SHARED_COLUMNS = [
     "dataset",
     "case_id",
     "lesion_id",
-    "recist_id",
     "ground_truth_volume_ml",
 ]
 
@@ -56,8 +45,10 @@ MERGED_METRIC_COLUMNS = [
 ]
 
 
-def _fmt_opt(val: Any) -> Any:
-    return "" if val is None else val
+def _fmt_float(val: Any, decimals: int) -> Any:
+    if val is None or val == "":
+        return ""
+    return round(float(val), decimals)
 
 
 def _voxel_volume_ml(spacing_xyz: list[float] | np.ndarray) -> float:
@@ -88,29 +79,27 @@ def _lookup_lesion_time(
     is_first: bool,
 ) -> float:
     if not time_map:
-        return round(case_total_s, 6) if is_first else 0.0
+        return round(case_total_s, 4) if is_first else 0.0
     candidates: list[str] = []
     if recist_id not in (None, ""):
         candidates.append(str(recist_id))
     candidates.append(str(lesion_id))
     for key in candidates:
         if key in time_map and time_map[key] not in ("", None):
-            return round(float(time_map[key]), 6)
+            return round(float(time_map[key]), 4)
     return 0.0
 
 
 def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Flatten case records into one row per RECIST lesion using Option A shared timings."""
+    """Flatten case records into human-readable per-lesion CSV rows using Option A shared timings."""
     out_rows: list[dict[str, Any]] = []
 
     for record in records:
         metrics = dict(record.get("metrics", {}))
-        status = str(record.get("status", "ok"))
         model_name = record.get("model_name") or record.get("model", "")
         dataset = record.get("dataset", "")
         case_id = record.get("case_id", "")
         device = record.get("device", "")
-        postprocess = record.get("postprocess", "none")
         spacing = record.get("spacing_xyz", [])
         rows = list(record.get("rows", []))
         lesion_inf_times = dict(record.get("per_lesion_inference_time_s", {}))
@@ -125,44 +114,33 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         case_save_s = float(metrics.get("output_saving_time_s") or 0.0)
         case_wall_s = float(metrics.get("end_to_end_wall_time_including_io_s") or 0.0)
 
-        peak_ram_mb = _fmt_opt(metrics.get("MaxRAM_MB"))
-        peak_cpu_pct = _fmt_opt(metrics.get("MaxCPU_Utilization_pct"))
-        peak_gpu_mb = _fmt_opt(metrics.get("MaxGPU_Mem_MB"))
-        gpu_status = metrics.get("gpu_monitor_status", "")
-        gpu_sanity = _fmt_opt(metrics.get("gpu_sanity_ok"))
-        err_msg = record.get("error", "")
+        peak_ram_mb = _fmt_float(metrics.get("MaxRAM_MB"), 1)
+        peak_gpu_mb = _fmt_float(metrics.get("MaxGPU_Mem_MB"), 1)
 
         if not rows:
+            c_load = round(case_load_s, 4)
+            c_inf = round(case_inf_s, 4)
+            c_post = round(case_post_s, 4)
             out_rows.append(
                 {
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": "",
-                    "recist_id": "",
                     "model_name": model_name,
                     "device": device,
-                    "postprocess": postprocess,
-                    "case_status": status,
-                    "prediction_status": "failed" if status != "ok" else "no_lesions",
-                    "ground_truth_voxels": "",
-                    "ground_truth_volume_ml": "",
-                    "predicted_voxels": "",
-                    "predicted_volume_ml": "",
                     "dice_score": "",
-                    "total_inference_time_s": round(case_load_s + case_inf_s + case_post_s, 6),
-                    "model_loading_time_s": round(case_load_s, 6),
-                    "model_inference_time_s": round(case_inf_s, 6),
-                    "postprocessing_time_s": round(case_post_s, 6),
-                    "data_loading_time_s": round(case_data_s, 6),
-                    "image_preprocessing_time_s": round(case_pre_s, 6),
-                    "output_saving_time_s": round(case_save_s, 6),
-                    "end_to_end_wall_time_including_io_s": round(case_wall_s, 6),
+                    "ground_truth_volume_ml": "",
+                    "predicted_volume_ml": "",
+                    "total_inference_time_s": round(c_load + c_inf + c_post, 4),
+                    "model_loading_time_s": c_load,
+                    "model_inference_time_s": c_inf,
+                    "postprocessing_time_s": c_post,
+                    "data_loading_time_s": round(case_data_s, 4),
+                    "image_preprocessing_time_s": round(case_pre_s, 4),
+                    "output_saving_time_s": round(case_save_s, 4),
+                    "end_to_end_wall_time_including_io_s": round(case_wall_s, 4),
                     "peak_ram_mb": peak_ram_mb,
-                    "peak_cpu_utilization_pct": peak_cpu_pct,
                     "peak_gpu_memory_mb": peak_gpu_mb,
-                    "gpu_monitor_status": gpu_status,
-                    "gpu_sanity_ok": gpu_sanity,
-                    "error_message": err_msg,
                 }
             )
             continue
@@ -174,40 +152,34 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             rid = r.get("recist_id")
             gt_vox = r.get("gt_voxels")
             pred_vox = r.get("pred_voxels")
-            gt_vol_ml = round(gt_vox * voxel_ml, 6) if (gt_vox is not None and np.isfinite(voxel_ml)) else ""
-            pred_vol_ml = round(pred_vox * voxel_ml, 6) if (pred_vox is not None and np.isfinite(voxel_ml)) else ""
+            gt_vol_ml = round(gt_vox * voxel_ml, 4) if (gt_vox is not None and np.isfinite(voxel_ml)) else ""
+            pred_vol_ml = round(pred_vox * voxel_ml, 4) if (pred_vox is not None and np.isfinite(voxel_ml)) else ""
 
-            row_load_s = round(case_load_s, 6) if is_first else 0.0
-            row_data_s = round(case_data_s, 6) if is_first else 0.0
-            row_pre_s = round(case_pre_s, 6) if is_first else 0.0
-            row_save_s = round(case_save_s, 6) if is_first else 0.0
-            row_wall_s = round(case_wall_s, 6) if is_first else 0.0
+            row_load_s = round(case_load_s, 4) if is_first else 0.0
+            row_data_s = round(case_data_s, 4) if is_first else 0.0
+            row_pre_s = round(case_pre_s, 4) if is_first else 0.0
+            row_save_s = round(case_save_s, 4) if is_first else 0.0
+            row_wall_s = round(case_wall_s, 4) if is_first else 0.0
 
             if single_lesion_case:
-                row_inf_s = round(case_inf_s, 6)
-                row_post_s = round(case_post_s, 6)
+                row_inf_s = round(case_inf_s, 4)
+                row_post_s = round(case_post_s, 4)
             else:
                 row_inf_s = _lookup_lesion_time(lesion_inf_times, rid, gid, case_inf_s, is_first)
                 row_post_s = _lookup_lesion_time(lesion_post_times, rid, gid, case_post_s, is_first)
 
-            row_total_inf_s = round(row_load_s + row_inf_s + row_post_s, 6)
+            row_total_inf_s = round(row_load_s + row_inf_s + row_post_s, 4)
 
             out_rows.append(
                 {
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": gid,
-                    "recist_id": _fmt_opt(rid),
                     "model_name": model_name,
                     "device": device,
-                    "postprocess": postprocess,
-                    "case_status": status,
-                    "prediction_status": r.get("status", ""),
-                    "ground_truth_voxels": _fmt_opt(gt_vox),
+                    "dice_score": round(float(r["dice"]), 4) if r.get("dice") is not None else "",
                     "ground_truth_volume_ml": gt_vol_ml,
-                    "predicted_voxels": _fmt_opt(pred_vox),
                     "predicted_volume_ml": pred_vol_ml,
-                    "dice_score": round(float(r["dice"]), 6) if r.get("dice") is not None else "",
                     "total_inference_time_s": row_total_inf_s,
                     "model_loading_time_s": row_load_s,
                     "model_inference_time_s": row_inf_s,
@@ -217,11 +189,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "output_saving_time_s": row_save_s,
                     "end_to_end_wall_time_including_io_s": row_wall_s,
                     "peak_ram_mb": peak_ram_mb,
-                    "peak_cpu_utilization_pct": peak_cpu_pct,
                     "peak_gpu_memory_mb": peak_gpu_mb,
-                    "gpu_monitor_status": gpu_status,
-                    "gpu_sanity_ok": gpu_sanity,
-                    "error_message": err_msg,
                 }
             )
 
@@ -229,7 +197,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def write_model_csv(records: list[dict[str, Any]], output_dir: str | Path) -> Path:
-    """Write a single per-model ``results.csv`` with one row per RECIST lesion."""
+    """Write a single human-readable per-model ``results.csv`` (one row per RECIST lesion)."""
     out_dir = Path(output_dir).resolve()
     csv_path = out_dir / "results.csv"
     _write_csv(csv_path, RESULT_COLUMNS, records_to_rows(records))
@@ -300,17 +268,13 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
             for r in rows
             if (str(r.get("model_name", "") or "model"), str(r.get("device", ""))) == grp
         ]
-        ok_rows = [r for r in grp_rows if r.get("case_status") == "ok"]
         case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in grp_rows}
-        ok_case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in ok_rows}
-        dices = [float(r["dice_score"]) for r in ok_rows if r.get("dice_score", "") not in ("", None)]
-        tot_times = [
-            float(r["total_inference_time_s"])
-            for r in ok_rows
-            if r.get("total_inference_time_s", "") not in ("", None)
-        ]
-        rams = [float(r["peak_ram_mb"]) for r in ok_rows if r.get("peak_ram_mb", "") not in ("", None)]
-        gpus = [float(r["peak_gpu_memory_mb"]) for r in ok_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
+        dices = [float(r["dice_score"]) for r in grp_rows if r.get("dice_score", "") not in ("", None)]
+        timed_rows = [r for r in grp_rows if r.get("total_inference_time_s", "") not in ("", None)]
+        timed_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in timed_rows}
+        tot_times = [float(r["total_inference_time_s"]) for r in timed_rows]
+        rams = [float(r["peak_ram_mb"]) for r in grp_rows if r.get("peak_ram_mb", "") not in ("", None)]
+        gpus = [float(r["peak_gpu_memory_mb"]) for r in grp_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
         summaries.append(
             {
                 "column_prefix": prefixes[grp],
@@ -320,7 +284,7 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
                 "lesions": sum(1 for r in grp_rows if str(r.get("lesion_id", "")) != ""),
                 "mean_dice_score": round(mean(dices), 4) if dices else None,
                 "mean_case_total_inference_time_s": (
-                    round(sum(tot_times) / len(ok_case_keys), 4) if tot_times and ok_case_keys else None
+                    round(sum(tot_times) / len(timed_cases), 4) if tot_times and timed_cases else None
                 ),
                 "max_peak_ram_mb": round(max(rams), 1) if rams else None,
                 "max_peak_gpu_memory_mb": round(max(gpus), 1) if gpus else None,

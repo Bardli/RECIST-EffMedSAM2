@@ -1,4 +1,4 @@
-"""Tests for standalone script CLIs, single-CSV Option A reporting, and metric-grouped merge."""
+"""Tests for standalone script CLIs, human-readable 18-col CSV, JSON diagnostics, and metric-grouped merge."""
 from __future__ import annotations
 
 import csv
@@ -20,6 +20,19 @@ from utils.csv_io import (
 from utils.monitor import CaseProfiler
 from utils.postprocess import finalize_and_save_predictions
 from utils.storage import IndependentPredictionWriter, load_independent_prediction
+
+DIAGNOSTIC_ONLY_COLUMNS = {
+    "recist_id",
+    "postprocess",
+    "case_status",
+    "prediction_status",
+    "ground_truth_voxels",
+    "predicted_voxels",
+    "peak_cpu_utilization_pct",
+    "gpu_monitor_status",
+    "gpu_sanity_ok",
+    "error_message",
+}
 
 
 def test_standalone_scripts_help_without_pythonpath():
@@ -110,6 +123,15 @@ def test_final_only_postprocessing_saves_single_npz_and_no_intermediate_dirs(tmp
         + rec["metrics"]["postprocessing_time_s"],
         atol=1e-5,
     )
+    # Full diagnostic fields remain preserved in the JSON receipt record
+    assert rec["status"] == "ok"
+    assert rec["postprocess"] == "moving_centroid"
+    assert rec["rows"][0]["recist_id"] == 1
+    assert rec["rows"][0]["gt_voxels"] > 0
+    assert rec["rows"][0]["pred_voxels"] > 0
+    assert "MaxCPU_Utilization_pct" in rec["metrics"]
+    assert "gpu_monitor_status" in rec["metrics"]
+    assert "gpu_sanity_ok" in rec["metrics"]
 
 
 def _make_record(
@@ -165,9 +187,9 @@ def _make_record(
             "model_loading_time_s": load_s,
             "model_inference_time_s": inf_total,
             "postprocessing_time_s": post_total,
-            "data_loading_time_s": 0.05,
-            "image_preprocessing_time_s": 0.04,
-            "output_saving_time_s": 0.03,
+            "data_loading_time_s": 0.05123,
+            "image_preprocessing_time_s": 0.04123,
+            "output_saving_time_s": 0.03123,
             "end_to_end_wall_time_including_io_s": wall_s,
             "MaxRAM_MB": ram_mb,
             "ram_baseline_mb": 100.0,
@@ -205,10 +227,10 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
                 model_name="EffMedSAM2",
                 device="cpu",
                 postprocess="moving_centroid",
-                load_s=0.4,
-                lesions=[(1, 0.88, 102, 1.2, 0.1)],
-                wall_s=1.82,
-                ram_mb=900.0,
+                load_s=0.41234,
+                lesions=[(1, 0.881234, 102, 1.23456, 0.10004)],
+                wall_s=1.82345,
+                ram_mb=900.16,
                 gpu_mb=0.0,
             ),
             _make_record(
@@ -256,7 +278,7 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
                 lesions=[(1, 0.89, 101, 0.2, 0.08)],
                 wall_s=0.70,
                 ram_mb=1200.0,
-                gpu_mb=2200.0,
+                gpu_mb=2200.04,
             ),
             _make_record(
                 dataset="colon",
@@ -325,20 +347,33 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
         eff_hdr = reader.fieldnames or []
         eff_rows = list(reader)
     assert eff_hdr == RESULT_COLUMNS
+    assert len(eff_hdr) == 18
+    assert not (set(eff_hdr) & DIAGNOSTIC_ONLY_COLUMNS)
     assert not any(c.startswith("post_") or c in ("total_runtime_s", "single_lesion_inference_time_s") for c in eff_hdr)
     assert len(eff_rows) == 4  # 1 (case_01) + 2 (case_02) + 1 (case_03_err fallback)
 
-    # Single-lesion case: model_inference_time_s == case inference time, Formula 1 holds
+    # Single-lesion case: 4-decimal rounding & exact additivity, 1-decimal RAM/VRAM
     c1 = eff_rows[0]
-    assert np.isclose(float(c1["model_inference_time_s"]), 1.2)
-    assert np.isclose(float(c1["total_inference_time_s"]), 1.7)
+    assert c1["dice_score"] == "0.8812"
+    assert c1["model_loading_time_s"] == "0.4123"
+    assert c1["model_inference_time_s"] == "1.2346"
+    assert c1["postprocessing_time_s"] == "0.1"
+    assert np.isclose(
+        float(c1["total_inference_time_s"]),
+        float(c1["model_loading_time_s"])
+        + float(c1["model_inference_time_s"])
+        + float(c1["postprocessing_time_s"]),
+        atol=1e-9,
+    )
+    assert c1["peak_ram_mb"] == "900.2"
+    assert c1["peak_gpu_memory_mb"] == "0.0"
 
     # Multi-lesion case (Option A): shared timings on lesion 1, zero on lesion 2; sums equal case total
     c2_l1, c2_l2 = eff_rows[1], eff_rows[2]
     assert float(c2_l1["model_loading_time_s"]) == 0.5
-    assert float(c2_l1["data_loading_time_s"]) == 0.05
-    assert float(c2_l1["image_preprocessing_time_s"]) == 0.04
-    assert float(c2_l1["output_saving_time_s"]) == 0.03
+    assert float(c2_l1["data_loading_time_s"]) == 0.0512
+    assert float(c2_l1["image_preprocessing_time_s"]) == 0.0412
+    assert float(c2_l1["output_saving_time_s"]) == 0.0312
     assert float(c2_l1["end_to_end_wall_time_including_io_s"]) == 2.72
     assert float(c2_l1["model_inference_time_s"]) == 1.1
     assert float(c2_l1["postprocessing_time_s"]) == 0.12
@@ -357,11 +392,16 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
         2.60,
     )
 
-    # Failed case row
+    # Failed case fallback row keeps observed timing/RAM with blank lesion/score fields
     c3 = eff_rows[3]
-    assert c3["case_status"] == "failed(exception)"
-    assert c3["prediction_status"] == "failed"
-    assert "bad input" in c3["error_message"]
+    assert c3["case_id"] == "case_03_err"
+    assert c3["lesion_id"] == ""
+    assert c3["dice_score"] == ""
+    assert c3["ground_truth_volume_ml"] == ""
+    assert c3["predicted_volume_ml"] == ""
+    assert float(c3["model_loading_time_s"]) == 0.2
+    assert float(c3["total_inference_time_s"]) == 0.2
+    assert c3["peak_ram_mb"] == "400.0"
 
     # Merge into a single metric-grouped CSV without PYTHONPATH
     merged_dir = tmp_path / "runs" / "merged"
@@ -401,6 +441,8 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
         f"{pref}_{metric}" for metric in MERGED_METRIC_COLUMNS for pref in expected_prefixes
     ]
     assert mhdr == expected_cols
+    assert len(MERGED_SHARED_COLUMNS) == 4
+    assert not (set(mhdr) & DIAGNOSTIC_ONLY_COLUMNS)
     # Exactly one time column per model in the merged table
     assert [c for c in mhdr if "time" in c] == [f"{pref}_total_inference_time_s" for pref in expected_prefixes]
 
@@ -409,13 +451,13 @@ def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     assert r0["case_id"] == "case_01"
     assert r0["lesion_id"] == "1"
     assert r0["ground_truth_volume_ml"] == "0.2"
-    assert r0["EffMedSAM2_cpu_dice_score"] == "0.88"
+    assert r0["EffMedSAM2_cpu_dice_score"] == "0.8812"
     assert r0["EffMedSAM2_cuda_dice_score"] == "0.89"
     assert r0["MedSAM2_dice_score"] == "0.84"
     assert r0["nnInteractive_box_dice_score"] == "0.91"
-    assert np.isclose(float(r0["EffMedSAM2_cpu_total_inference_time_s"]), 1.7)
+    assert np.isclose(float(r0["EffMedSAM2_cpu_total_inference_time_s"]), 1.7469)
     assert np.isclose(float(r0["MedSAM2_total_inference_time_s"]), 3.0)
-    assert float(r0["EffMedSAM2_cuda_peak_gpu_memory_mb"]) == 2200.0
+    assert r0["EffMedSAM2_cuda_peak_gpu_memory_mb"] == "2200.0"
 
     # Also check direct .csv path via -o out/custom.csv
     custom_csv = tmp_path / "custom_out" / "compare.csv"

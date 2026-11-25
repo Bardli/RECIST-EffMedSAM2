@@ -93,17 +93,19 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```bash
 .venv-sam/bin/python infer_effmedsam2.py -i "<INPUT_DIR>" -o runs/smoke_eff --device cpu --num-threads 1 --limit 1 --plots
 ```
-Audit `runs/smoke_eff/results.csv`:
-- `case_status == ok`.
-- `total_inference_time_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `end_to_end_wall_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
-- `end_to_end_wall_time_including_io_s >= total_inference_time_s` on the 1st lesion row.
-- `peak_ram_mb > 0`.
-- No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced; `predicted_voxels`, `predicted_volume_ml`, and `dice_score` reflect the final saved output.
-- **On `--device cpu`:**
-  - If `gpu_monitor_status == measured`: confirm `gpu_sanity_ok == True` and `peak_gpu_memory_mb == 0.0`.
-  - If running on a CPU-only machine without NVIDIA tooling (`gpu_monitor_status == unavailable`), confirm `peak_gpu_memory_mb` and `gpu_sanity_ok` are blank (not `0.0`).
-  - Never accept `gpu_monitor_status == query_failed` / `partial` as zero VRAM.
-- **On `--device cuda --gpu-index N`:** confirm `gpu_monitor_status == measured` and nonzero GPU usage on physical card `N`.
+Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full diagnostic JSON receipt (`runs/smoke_eff/metrics/<case_id>.metrics.json`):
+- In `runs/smoke_eff/results.csv`:
+  - `total_inference_time_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `end_to_end_wall_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
+  - `end_to_end_wall_time_including_io_s >= total_inference_time_s` on the 1st lesion row.
+  - `peak_ram_mb > 0`, and `predicted_volume_ml` / `dice_score` reflect the final saved output.
+  - No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced.
+- In `runs/smoke_eff/metrics/<case_id>.metrics.json`:
+  - `status == "ok"` and `metrics.ram_baseline_mb > 0`.
+  - **On `--device cpu`:**
+    - If `metrics.gpu_monitor_status == "measured"`: confirm `metrics.gpu_sanity_ok is True` and `metrics.MaxGPU_Mem_MB == 0.0` (and `peak_gpu_memory_mb == 0.0` in `results.csv`).
+    - If running on a CPU-only machine without NVIDIA tooling (`metrics.gpu_monitor_status == "unavailable"`): confirm `metrics.gpu_sanity_ok is None` and `peak_gpu_memory_mb` is blank in `results.csv` (not `0.0`).
+    - Never accept `gpu_monitor_status` in `{"query_failed", "partial"}` as zero VRAM.
+  - **On `--device cuda --gpu-index N`:** confirm `metrics.gpu_monitor_status == "measured"` and nonzero GPU usage on physical card `N`.
 
 Unless the user explicitly requested an unattended full run in Step 0, share the 1-case `results.csv` summary and wait for confirmation before launching the full dataset.
 
@@ -118,7 +120,7 @@ Run each requested script without `--limit`, then merge the per-model `results.c
 ```
 Summarize observed results from:
 - `runs/merged/merged_results.csv`
-- Per-model `<output-dir>/results.csv` files (explicitly flagging any `failed(...)` rows if present).
+- Per-model `<output-dir>/results.csv` files and `metrics/*.metrics.json` (explicitly flagging any non-`"ok"` cases if present).
 
 ---
 
