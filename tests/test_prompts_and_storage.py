@@ -14,7 +14,14 @@ from utils.ct_inputs import (
     resize_grayscale_to_rgb_and_resize,
 )
 from utils.postprocess import apply_moving_centroid_to_channels
-from utils.prompts import get_diameter_bbox, points_for_mode, recist_bbox, recist_endpoints, scribble_plane
+from utils.prompts import (
+    find_recist_slices,
+    get_diameter_bbox,
+    points_for_mode,
+    recist_bbox,
+    recist_endpoints,
+    scribble_plane,
+)
 from utils.storage import IndependentPredictionWriter, load_independent_prediction
 
 
@@ -116,6 +123,17 @@ def test_recist_prompts_and_scribble():
     scrib = scribble_plane(plane, thickness=[1, 2, 2], stroke="skeleton", inset=3)
     assert scrib.dtype == bool
     assert 0 < int(scrib.sum()) < int((plane > 0).sum())
+
+
+def test_find_recist_slices_multilabel():
+    recist_3d = np.zeros((10, 32, 32), dtype=np.uint16)
+    cv2.line(recist_3d[7], (4, 8), (18, 8), 5, thickness=2)
+    cv2.line(recist_3d[2], (10, 20), (24, 20), 2, thickness=2)
+    cv2.line(recist_3d[7], (20, 20), (28, 20), 2, thickness=2)
+
+    slices_map = find_recist_slices(recist_3d)
+    assert list(slices_map.keys()) == [2, 5]
+    assert slices_map == {2: [2, 7], 5: [7]}
 
 
 def test_independent_storage_overlap_empty_and_postprocess(tmp_path: Path):

@@ -51,7 +51,7 @@ def test_summarize_samples_math_and_cpu_sanity():
         gpu_monitor_status="measured",
         gpu_monitor_backend="pynvml",
     )
-    assert np.isclose(m["total_runtime_s"], 1.85)
+    assert np.isclose(m["total_inference_time_s"], 1.85)
     assert np.isclose(m["model_loading_time_s"], 0.4)
     assert np.isclose(m["model_inference_time_s"], 1.2)
     assert np.isclose(m["postprocessing_time_s"], 0.25)
@@ -153,11 +153,11 @@ def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     assert m["ram_inference_peak_mb"] > 0.0
     assert m["postprocessing_time_s"] >= 0.02
     assert np.isclose(
-        m["total_runtime_s"],
+        m["total_inference_time_s"],
         m["model_loading_time_s"] + m["model_inference_time_s"] + m["postprocessing_time_s"],
         atol=1e-5,
     )
-    assert m["end_to_end_wall_time_including_io_s"] > m["total_runtime_s"]
+    assert m["end_to_end_wall_time_including_io_s"] > m["total_inference_time_s"]
     assert "postprocessing_time" in record["phase_spans"]
     if m["gpu_monitor_status"] == "measured":
         assert m["MaxGPU_Mem_MB"] == 0.0

@@ -79,7 +79,7 @@ RECIST-EffMedSAM2/
 │   ├── inputs/           # default --input-dir (*.npz)
 │   └── window_twins/     # optional pre-windowed twins for EffMedSAM2 / MedSAM2
 ├── assets/               # checkpoints
-└── runs/                 # per-model predictions, metrics JSONs, plots, and CSVs
+└── runs/                 # per-model predictions, metrics JSONs, plots, and results.csv
 ```
 
 Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
@@ -95,13 +95,13 @@ Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
 
 ### 3. Run inference & merge CSVs
 
-Each model has one standalone Python script that reloads the model fresh per case, runs serial single-threaded inference (`--num-threads 1`) by default, records explicit per-phase timings and RAM/GPU telemetry, saves final prediction NPZs, and writes independent `case_metrics.csv` and `lesion_scores.csv` files:
+Each model has one standalone Python script that reloads the model fresh per case, runs serial single-threaded inference (`--num-threads 1`) by default, records explicit per-phase timings and RAM/GPU telemetry, saves final prediction NPZs, and writes **one per-model `results.csv`** (one RECIST lesion per row):
 
 ```bash
-# 1) RECIST-EffMedSAM2 (outputs runs/EffMedSAM2/{case_metrics,lesion_scores}.csv)
+# 1) RECIST-EffMedSAM2 (outputs runs/EffMedSAM2/results.csv)
 .venv-sam/bin/python infer_effmedsam2.py -i data/inputs -o runs/EffMedSAM2 --device cpu --plots
 
-# 2) MedSAM2 (outputs runs/MedSAM2/{case_metrics,lesion_scores}.csv)
+# 2) MedSAM2 (outputs runs/MedSAM2/results.csv)
 .venv-sam/bin/python infer_medsam2.py -i data/inputs -o runs/MedSAM2 --device cpu --plots
 
 # 3) nnInteractive (box, 3-point, or scribble)
@@ -110,10 +110,10 @@ Each model has one standalone Python script that reloads the model fresh per cas
 .venv-nn/bin/python infer_nninteractive.py -i data/inputs -o runs/nnInteractive_scribble --prompt-mode line --device cpu --plots
 ```
 
-Finally, merge the per-model CSVs horizontally into model-prefixed comparison tables (`merged_case_metrics.csv`, `merged_lesion_scores.csv`, and `model_summary.csv`):
+Finally, merge the per-model `results.csv` files horizontally into **one compact wide comparison CSV (`merged_results.csv`)**, with columns grouped side-by-side by metric (`dice_score`, `predicted_volume_ml`, `total_inference_time_s`, `peak_ram_mb`, `peak_gpu_memory_mb`):
 
 ```bash
-.venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged
+.venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged/merged_results.csv
 ```
 
 <details>
@@ -136,7 +136,7 @@ Finally, merge the per-model CSVs horizontally into model-prefixed comparison ta
 .venv-sam/bin/python infer_effmedsam2.py --model-size small -i data/inputs -o runs/EffMedSAM2_small
 
 # Auto-discover all model folders under runs/ when merging
-.venv-sam/bin/python merge_csvs.py --runs-dir runs -o runs/merged
+.venv-sam/bin/python merge_csvs.py --runs-dir runs -o runs/merged/merged_results.csv
 ```
 
 </details>

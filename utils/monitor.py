@@ -358,7 +358,7 @@ def summarize_samples(
     model_load_s = float(timings.get("model_loading_time_s", 0.0))
     inference_s = float(timings.get("model_inference_time_s", 0.0))
     postprocess_s = float(timings.get("postprocessing_time_s", 0.0))
-    total_runtime_s = model_load_s + inference_s + postprocess_s
+    total_inference_time_s = model_load_s + inference_s + postprocess_s
 
     sampled_ram_peak = max(samples.ram_mb) if samples.ram_mb else 0.0
     max_ram_mb = max(sampled_ram_peak, float(ru_maxrss_mb), float(ram_baseline_mb))
@@ -427,7 +427,7 @@ def summarize_samples(
         gpu_sanity_ok = bool(cuda_available and gpu_monitor_status in ("measured", "partial"))
 
     return {
-        "total_runtime_s": round(total_runtime_s, 6),
+        "total_inference_time_s": round(total_inference_time_s, 6),
         "model_loading_time_s": round(model_load_s, 6),
         "model_inference_time_s": round(inference_s, 6),
         "postprocessing_time_s": round(postprocess_s, 6),
@@ -480,6 +480,7 @@ class CaseProfiler:
         self.timings: dict[str, float] = {}
         self.phase_spans: dict[str, list[tuple[float, float]]] = {}
         self.per_lesion_inference_time_s: dict[str, float] = {}
+        self.per_lesion_postprocessing_time_s: dict[str, float] = {}
 
         try:
             self._root_proc: psutil.Process | None = psutil.Process(self.target_pid)
@@ -637,6 +638,9 @@ class CaseProfiler:
     def record_lesion_time(self, label_id: int, elapsed_s: float) -> None:
         self.per_lesion_inference_time_s[str(int(label_id))] = round(float(elapsed_s), 6)
 
+    def record_lesion_postprocess_time(self, label_id: int, elapsed_s: float) -> None:
+        self.per_lesion_postprocessing_time_s[str(int(label_id))] = round(float(elapsed_s), 6)
+
     def finalize(
         self,
         extra_metadata: dict[str, Any] | None = None,
@@ -689,6 +693,7 @@ class CaseProfiler:
                 for k, spans in self.phase_spans.items()
             },
             "per_lesion_inference_time_s": dict(self.per_lesion_inference_time_s),
+            "per_lesion_postprocessing_time_s": dict(self.per_lesion_postprocessing_time_s),
             "metrics": metrics,
             "samples": {
                 "interval": self.samples.interval,

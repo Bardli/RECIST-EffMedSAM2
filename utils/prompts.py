@@ -13,6 +13,19 @@ def seed_all() -> None:
     np.random.seed(SEED)
 
 
+def find_recist_slices(recist_3d: np.ndarray) -> dict[int, list[int]]:
+    """Map each sorted non-zero RECIST label ID to the list of Z slices containing it."""
+    slices_by_label: dict[int, list[int]] = {}
+    for z in range(recist_3d.shape[0]):
+        sl = recist_3d[z]
+        if not np.any(sl):
+            continue
+        for lab in np.unique(sl):
+            if lab != 0:
+                slices_by_label.setdefault(int(lab), []).append(z)
+    return dict(sorted(slices_by_label.items()))
+
+
 def recist_endpoints(
     recist_per_lab: np.ndarray,
     subtract_thickness: float = SUBTRACT_THICKNESS,

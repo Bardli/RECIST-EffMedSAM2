@@ -1,4 +1,4 @@
-"""Merge per-model CSVs horizontally into wide model-prefixed comparison tables."""
+"""Merge per-model results.csv files into one metric-grouped wide comparison table."""
 from __future__ import annotations
 
 import argparse
@@ -16,20 +16,22 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=Path,
         default=None,
-        help="Per-model output directories (or direct CSV paths) to merge",
+        help="Per-model output directories (or direct results.csv paths) to merge",
     )
     ap.add_argument(
         "--runs-dir",
         type=Path,
         default=None,
-        help="Scan a parent runs directory for model folders containing case_metrics.csv / lesion_scores.csv",
+        help="Scan a parent runs directory for model folders containing results.csv",
     )
     ap.add_argument(
         "-o",
+        "--output",
         "--output-dir",
+        dest="output",
         type=Path,
         default=Path("runs/merged"),
-        help="Output folder for merged CSVs (default: runs/merged)",
+        help="Output .csv path or directory for merged_results.csv (default: runs/merged)",
     )
     return ap
 
@@ -42,10 +44,10 @@ def _discover_run_subdirs(runs_dir: Path) -> list[Path]:
         if p.is_dir()
         and p.name not in skip
         and not p.name.startswith("merged")
-        and ((p / "case_metrics.csv").is_file() or (p / "lesion_scores.csv").is_file())
+        and (p / "results.csv").is_file()
     ]
     if not dirs:
-        raise FileNotFoundError(f"No model CSV folders found under {runs_dir}")
+        raise FileNotFoundError(f"No model folders containing results.csv found under {runs_dir}")
     return dirs
 
 
@@ -63,9 +65,22 @@ def main() -> int:
         else:
             raise SystemExit("Pass -i/--inputs <model_dir...> or --runs-dir <runs_root>.")
 
-    written = merge_model_csvs(inputs, args.output_dir)
-    for key, path in written.items():
-        print(f"Wrote {key}: {path}")
+    merged_csv, summaries = merge_model_csvs(inputs, args.output)
+    print(f"Wrote: {merged_csv}")
+    for s in summaries:
+        dice_s = f"{s['mean_dice_score']:.4f}" if s["mean_dice_score"] is not None else "n/a"
+        time_s = (
+            f"{s['mean_case_total_inference_time_s']:.3f}s"
+            if s["mean_case_total_inference_time_s"] is not None
+            else "n/a"
+        )
+        ram_s = f"{s['max_peak_ram_mb']:.1f}MB" if s["max_peak_ram_mb"] is not None else "n/a"
+        gpu_s = f"{s['max_peak_gpu_memory_mb']:.1f}MB" if s["max_peak_gpu_memory_mb"] is not None else "n/a"
+        print(
+            f"  {s['column_prefix']} ({s['device'] or 'n/a'}): "
+            f"cases={s['cases']} | lesions={s['lesions']} | "
+            f"mean_dice={dice_s} | mean_total_inf={time_s} | peak_ram={ram_s} | peak_gpu={gpu_s}"
+        )
     return 0
 
 

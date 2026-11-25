@@ -66,7 +66,7 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. No `
    ```
 
 ### Step 3: Offline Self-Test
-Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, standalone CLIs, and wide CSV merging before running real checkpoints:
+Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, standalone CLIs, single-CSV Option A reporting, and metric-grouped merging before running real checkpoints:
 ```bash
 uv pip install --python .venv-sam/bin/python pytest
 .venv-sam/bin/pytest -v
@@ -93,41 +93,41 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```bash
 .venv-sam/bin/python infer_effmedsam2.py -i "<INPUT_DIR>" -o runs/smoke_eff --device cpu --num-threads 1 --limit 1 --plots
 ```
-Audit `runs/smoke_eff/case_metrics.csv`:
-- `status == ok`.
-- `total_runtime_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s`.
-- `end_to_end_wall_time_including_io_s >= total_runtime_s`.
-- `MaxRAM_MB > 0` and `ram_baseline_mb > 0`.
-- No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced; `pred_voxels`, `pred_volume_ml`, `dice`, and `mean_dice` reflect the final saved output.
+Audit `runs/smoke_eff/results.csv`:
+- `case_status == ok`.
+- `total_inference_time_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `end_to_end_wall_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
+- `end_to_end_wall_time_including_io_s >= total_inference_time_s` on the 1st lesion row.
+- `peak_ram_mb > 0`.
+- No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced; `predicted_voxels`, `predicted_volume_ml`, and `dice_score` reflect the final saved output.
 - **On `--device cpu`:**
-  - If `gpu_monitor_status == measured`: confirm `gpu_sanity_ok == True`, `MaxGPU_Mem_MB == 0.0`, and `gpu_nvml_peak_mb == 0.0`.
-  - If running on a CPU-only machine without NVIDIA tooling (`gpu_monitor_status == unavailable`), confirm `MaxGPU_Mem_MB` and `gpu_sanity_ok` are blank (not `0.0`).
+  - If `gpu_monitor_status == measured`: confirm `gpu_sanity_ok == True` and `peak_gpu_memory_mb == 0.0`.
+  - If running on a CPU-only machine without NVIDIA tooling (`gpu_monitor_status == unavailable`), confirm `peak_gpu_memory_mb` and `gpu_sanity_ok` are blank (not `0.0`).
   - Never accept `gpu_monitor_status == query_failed` / `partial` as zero VRAM.
 - **On `--device cuda --gpu-index N`:** confirm `gpu_monitor_status == measured` and nonzero GPU usage on physical card `N`.
 
-Unless the user explicitly requested an unattended full run in Step 0, share the 1-case CSV summary and wait for confirmation before launching the full dataset.
+Unless the user explicitly requested an unattended full run in Step 0, share the 1-case `results.csv` summary and wait for confirmation before launching the full dataset.
 
 ### Step 7: Full Run, CSV Merge & Final Report
-Run each requested script without `--limit`, then merge the per-model CSVs with `merge_csvs.py`:
+Run each requested script without `--limit`, then merge the per-model `results.csv` files into one metric-grouped `merged_results.csv` with `merge_csvs.py`:
 ```bash
 .venv-sam/bin/python infer_effmedsam2.py -i "<INPUT_DIR>" -o runs/EffMedSAM2 --device "<cpu|cuda>" --num-threads 1 --plots
 .venv-sam/bin/python infer_medsam2.py -i "<INPUT_DIR>" -o runs/MedSAM2 --device "<cpu|cuda>" --num-threads 1 --plots
 .venv-nn/bin/python infer_nninteractive.py -i "<INPUT_DIR>" -o runs/nnInteractive_box --prompt-mode box --device "<cpu|cuda>" --num-threads 1 --plots
 
-.venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged
+.venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged/merged_results.csv
 ```
 Summarize observed results from:
-- `runs/merged/model_summary.csv`
-- `runs/merged/merged_case_metrics.csv`
-- `runs/merged/merged_lesion_scores.csv` (explicitly flagging any `failed(...)` cases if present).
+- `runs/merged/merged_results.csv`
+- Per-model `<output-dir>/results.csv` files (explicitly flagging any `failed(...)` rows if present).
 
 ---
 
 ## Part B — Strict Execution, HU & Repo Hygiene Policy
 
 ### 1. Execution & Model-Loading Invariants
-1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case loop iteration, are counted in `total_runtime_s` (`model_loading_time_s + model_inference_time_s + postprocessing_time_s`), and explicitly clean up (`del`, `gc.collect()`, `empty_cache()`) after each case.
+1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case loop iteration, are counted in `total_inference_time_s` (`model_loading_time_s + model_inference_time_s + postprocessing_time_s`), and explicitly clean up (`del`, `gc.collect()`, `empty_cache()`) after each case.
 2. **Postprocessing inside profiler & final-only output:** `moving_centroid` postprocessing executes inside `CaseProfiler.phase("postprocessing_time")`, and only the final prediction NPZ and final Dice/volume columns are written.
+3. **RECIST prompt alignment:** Slice discovery (`find_recist_slices`) and 2D prompt extraction run inside `image_preprocessing_time_s` so `model_inference_time_s` and per-lesion timing cover pure inference symmetrically.
 3. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to keep host RAM bounded and timings stable.
 4. **Strict CPU isolation & physical GPU mapping:**
    - `--device cpu`: forces `CUDA_VISIBLE_DEVICES=""` and `NVIDIA_VISIBLE_DEVICES="void"` before importing PyTorch and asserts `torch.cuda.is_available() == False`, while querying **all** physical GPUs via NVML.

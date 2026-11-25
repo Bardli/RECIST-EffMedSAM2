@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from typing import Any
 
 # Configure device visibility and thread pools BEFORE importing PyTorch.
 from utils.monitor import apply_thread_env, configure_device_env
@@ -68,12 +69,12 @@ def main() -> int:
     from nnInteractive.inference.inference_session import nnInteractiveInferenceSession
     from nnunetv2.utilities.helpers import empty_cache
 
-    from utils.csv_io import write_model_csvs
+    from utils.csv_io import write_model_csv
     from utils.ct_inputs import discover_cases, load_gt, nninteractive_image
     from utils.device_memory import reset_cuda_peaks
     from utils.monitor import CaseProfiler, plot_case, write_json_atomic
     from utils.postprocess import finalize_and_save_predictions
-    from utils.prompts import get_diameter_bbox, points_for_mode, scribble_plane, seed_all
+    from utils.prompts import find_recist_slices, get_diameter_bbox, points_for_mode, scribble_plane, seed_all
     from utils.storage import IndependentPredictionWriter, sha256
 
     if args.device == "cpu" and torch.cuda.is_available():
@@ -140,7 +141,7 @@ def main() -> int:
             gpu_tolerance_mb=args.gpu_tolerance_mb,
         ) as profiler:
             try:
-                # 1. Model loading (counted in total_runtime_s)
+                # 1. Model loading (counted in total_inference_time_s)
                 with profiler.phase("model_loading_time"):
                     session_kwargs = dict(
                         device=torch_device,
@@ -154,7 +155,7 @@ def main() -> int:
                     session = nnInteractiveInferenceSession(**session_kwargs)
                     session.initialize_from_trained_model_folder(model_training_output_dir=str(ckpt_dir), use_fold=fold)
 
-                # 2. Data load & decompression (excluded from total_runtime_s)
+                # 2. Data load & decompression (excluded from total_inference_time_s)
                 with profiler.phase("data_loading_time"):
                     with np.load(case_path, allow_pickle=False) as data:
                         imgs = nninteractive_image(data, require_raw=args.require_raw_hu)
@@ -162,14 +163,40 @@ def main() -> int:
                         spacing = np.asarray(data["spacing"])
                         gts, _ = load_gt(data, "auto", case_path.name)
 
-                # 3. Preprocessing + session image setup (excluded from total_runtime_s)
+                # 3. Preprocessing + session image setup + RECIST prompt extraction (excluded from total_inference_time_s)
                 with profiler.phase("image_preprocessing_time"):
                     session.set_image(imgs[None].astype(np.float32))
                     session.set_target_buffer(torch.zeros(imgs.shape, dtype=torch.uint8, device="cpu"))
                     if hasattr(session, "_finish_preprocessing_and_initialize_interactions"):
                         session._finish_preprocessing_and_initialize_interactions()
 
-                unique_labs = [int(x) for x in np.unique(recist) if x != 0]
+                    slices_by_label = find_recist_slices(recist)
+                    prepared_prompts: list[tuple[int, int, Any]] = []
+                    for lab, z_indices in slices_by_label.items():
+                        z_mid = z_indices[0]
+                        slice_mask = recist[z_mid] == lab
+                        slice_2d = slice_mask.astype(np.uint8)
+                        if args.prompt_mode == "box":
+                            payload: Any = [int(v) for v in get_diameter_bbox(slice_2d)]
+                        elif args.prompt_mode == "line":
+                            plane = scribble_plane(
+                                slice_mask,
+                                session.preferred_scribble_thickness,
+                                stroke=args.scribble_stroke,
+                                inset=args.scribble_inset,
+                            )
+                            if has_interaction_bbox:
+                                ys, xs = np.nonzero(plane)
+                                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                                crop = np.ascontiguousarray(plane[None, y0:y1, x0:x1].astype(np.uint8))
+                                payload = ("crop", crop, [[z_mid, z_mid + 1], [y0, y1], [x0, x1]])
+                            else:
+                                payload = ("plane", plane)
+                        else:
+                            payload = points_for_mode(slice_2d, args.prompt_mode)
+                        prepared_prompts.append((lab, z_mid, payload))
+
                 metadata = {
                     "dataset": dataset_label,
                     "case_id": case_id,
@@ -191,50 +218,36 @@ def main() -> int:
                     metadata=metadata,
                     scratch=args.scratch,
                 ) as writer:
-                    # 4. Pure model inference (counted in total_runtime_s)
+                    # 4. Pure model inference (counted in total_inference_time_s)
                     with profiler.phase("model_inference_time"):
-                        for lab in unique_labs:
-                            recist_mask = recist == lab
-                            z_indices = np.unique(np.where(recist_mask)[0])
-                            if len(z_indices) == 0:
-                                continue
-                            z_mid = int(z_indices[0])
-                            slice_2d = recist_mask[z_mid].astype(np.uint8)
-
+                        for lab, z_mid, payload in prepared_prompts:
                             if session.device.type == "cuda":
                                 torch.cuda.synchronize(session.device)
                             t_lesion = time.perf_counter()
 
                             session.reset_interactions()
                             if args.prompt_mode == "box":
-                                x_min, y_min, x_max, y_max = [int(v) for v in get_diameter_bbox(slice_2d)]
+                                x_min, y_min, x_max, y_max = payload
                                 session.add_bbox_interaction(
                                     [[z_mid, z_mid + 1], [y_min, y_max + 1], [x_min, x_max + 1]],
                                     include_interaction=True,
                                 )
                             elif args.prompt_mode == "line":
-                                plane = scribble_plane(
-                                    recist_mask[z_mid],
-                                    session.preferred_scribble_thickness,
-                                    stroke=args.scribble_stroke,
-                                    inset=args.scribble_inset,
-                                )
-                                if has_interaction_bbox:
-                                    ys, xs = np.nonzero(plane)
-                                    y0, y1 = int(ys.min()), int(ys.max()) + 1
-                                    x0, x1 = int(xs.min()), int(xs.max()) + 1
-                                    crop = np.ascontiguousarray(plane[None, y0:y1, x0:x1].astype(np.uint8))
+                                kind = payload[0]
+                                if kind == "crop":
+                                    _, crop, interaction_bbox = payload
                                     session.add_scribble_interaction(
                                         crop,
                                         include_interaction=True,
-                                        interaction_bbox=[[z_mid, z_mid + 1], [y0, y1], [x0, x1]],
+                                        interaction_bbox=interaction_bbox,
                                     )
                                 else:
+                                    _, plane = payload
                                     svol = np.zeros(recist.shape, dtype=np.uint8)
                                     svol[z_mid] = plane
                                     session.add_scribble_interaction(svol, include_interaction=True)
                             else:
-                                pts_xy = points_for_mode(slice_2d, args.prompt_mode)
+                                pts_xy = payload
                                 if args.interaction == "progressive":
                                     for px, py in pts_xy:
                                         session.add_point_interaction((z_mid, int(py), int(px)), include_interaction=True)
@@ -317,13 +330,12 @@ def main() -> int:
         m = record["metrics"]
         print(
             f"[{idx + 1}/{len(cases)}] {model_name} | {case_id} | {record['status']} | "
-            f"total_runtime={m['total_runtime_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
+            f"total_inference={m['total_inference_time_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
             f"MaxRAM={m['MaxRAM_MB']:.1f}MB"
         )
 
-    csv_paths = write_model_csvs(records, out_dir)
-    print(f"Saved: {csv_paths['case_metrics']}")
-    print(f"Saved: {csv_paths['lesion_scores']}")
+    csv_path = write_model_csv(records, out_dir)
+    print(f"Saved: {csv_path}")
     return 1 if failures else 0
 
 

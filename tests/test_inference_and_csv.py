@@ -1,4 +1,4 @@
-"""Tests for standalone script CLIs, final-only postprocessing, and wide model-prefixed CSV merging."""
+"""Tests for standalone script CLIs, single-CSV Option A reporting, and metric-grouped merge."""
 from __future__ import annotations
 
 import csv
@@ -11,7 +11,12 @@ import time
 import cv2
 import numpy as np
 
-from utils.csv_io import CASE_COLUMNS, LESION_COLUMNS, write_model_csvs
+from utils.csv_io import (
+    MERGED_METRIC_COLUMNS,
+    MERGED_SHARED_COLUMNS,
+    RESULT_COLUMNS,
+    write_model_csv,
+)
 from utils.monitor import CaseProfiler
 from utils.postprocess import finalize_and_save_predictions
 from utils.storage import IndependentPredictionWriter, load_independent_prediction
@@ -97,8 +102,9 @@ def test_final_only_postprocessing_saves_single_npz_and_no_intermediate_dirs(tmp
     loaded = load_independent_prediction(out_npz)
     assert loaded["segs"][0, 4, 0, 0] == 0
     assert rec["metrics"]["postprocessing_time_s"] > 0.0
+    assert rec["per_lesion_postprocessing_time_s"]["1"] > 0.0
     assert np.isclose(
-        rec["metrics"]["total_runtime_s"],
+        rec["metrics"]["total_inference_time_s"],
         rec["metrics"]["model_loading_time_s"]
         + rec["metrics"]["model_inference_time_s"]
         + rec["metrics"]["postprocessing_time_s"],
@@ -114,15 +120,17 @@ def _make_record(
     device: str,
     postprocess: str,
     load_s: float,
-    inf_s: float,
-    post_s: float,
+    lesions: list[tuple[int, float, int, float, float]],
     wall_s: float,
-    dice1: float,
-    pred_vox1: int,
     ram_mb: float,
     gpu_mb: float | None,
+    status: str = "ok",
+    error: str = "",
 ) -> dict:
-    total_rt = load_s + inf_s + post_s
+    # lesions: [(gt_id, dice, pred_voxels, inf_s, post_s)]
+    inf_total = round(sum(x[3] for x in lesions), 6)
+    post_total = round(sum(x[4] for x in lesions), 6)
+    total_inf = round(load_s + inf_total + post_total, 6)
     return {
         "dataset": dataset,
         "case_id": case_id,
@@ -131,30 +139,32 @@ def _make_record(
         "physical_gpu_index": 0 if device == "cuda" else None,
         "num_threads": 1,
         "postprocess": postprocess,
-        "status": "ok",
-        "error": "",
-        "n_lesions": 1,
+        "status": status,
+        "error": error,
+        "n_lesions": len(lesions),
         "shape_zyx": [8, 48, 48],
         "spacing_xyz": [1.0, 1.0, 2.0],
-        "per_lesion_inference_time_s": {"1": round(inf_s, 6)},
+        "per_lesion_inference_time_s": {str(gid): round(inf_s, 6) for gid, _, _, inf_s, _ in lesions},
+        "per_lesion_postprocessing_time_s": {str(gid): round(post_s, 6) for gid, _, _, _, post_s in lesions},
         "rows": [
             {
-                "channel_index": 0,
-                "gt_id": 1,
-                "recist_id": 1,
-                "prediction_id": 1,
+                "channel_index": i,
+                "gt_id": gid,
+                "recist_id": gid,
+                "prediction_id": gid,
                 "status": "predicted",
                 "gt_voxels": 100,
-                "pred_voxels": pred_vox1,
-                "intersection": int(round(dice1 * (100 + pred_vox1) / 2.0)),
-                "dice": dice1,
+                "pred_voxels": pvox,
+                "intersection": int(round(dice * (100 + pvox) / 2.0)),
+                "dice": dice,
             }
+            for i, (gid, dice, pvox, _, _) in enumerate(lesions)
         ],
         "metrics": {
-            "total_runtime_s": round(total_rt, 6),
+            "total_inference_time_s": total_inf,
             "model_loading_time_s": load_s,
-            "model_inference_time_s": inf_s,
-            "postprocessing_time_s": post_s,
+            "model_inference_time_s": inf_total,
+            "postprocessing_time_s": post_total,
             "data_loading_time_s": 0.05,
             "image_preprocessing_time_s": 0.04,
             "output_saving_time_s": 0.03,
@@ -178,7 +188,7 @@ def _make_record(
     }
 
 
-def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
+def test_single_csv_option_a_and_metric_grouped_merge_cli(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
 
     eff_cpu_dir = tmp_path / "runs" / "EffMedSAM2_cpu"
@@ -186,7 +196,8 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
     med_dir = tmp_path / "runs" / "MedSAM2"
     nn_dir = tmp_path / "runs" / "nnInteractive_box"
 
-    eff_cpu_csvs = write_model_csvs(
+    # Case 1 (1 lesion), Case 2 (2 lesions -> Option A shared timings on row 0 only), Case 3 (failed)
+    eff_cpu_csv = write_model_csv(
         [
             _make_record(
                 dataset="colon",
@@ -195,18 +206,45 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="moving_centroid",
                 load_s=0.4,
-                inf_s=1.2,
-                post_s=0.1,
+                lesions=[(1, 0.88, 102, 1.2, 0.1)],
                 wall_s=1.82,
-                dice1=0.88,
-                pred_vox1=102,
                 ram_mb=900.0,
                 gpu_mb=0.0,
-            )
+            ),
+            _make_record(
+                dataset="colon",
+                case_id="case_02",
+                model_name="EffMedSAM2",
+                device="cpu",
+                postprocess="moving_centroid",
+                load_s=0.5,
+                lesions=[(1, 0.85, 95, 1.1, 0.12), (2, 0.90, 104, 0.8, 0.08)],
+                wall_s=2.72,
+                ram_mb=950.0,
+                gpu_mb=0.0,
+            ),
+            _make_record(
+                dataset="colon",
+                case_id="case_03_err",
+                model_name="EffMedSAM2",
+                device="cpu",
+                postprocess="moving_centroid",
+                load_s=0.2,
+                lesions=[],
+                wall_s=0.25,
+                ram_mb=400.0,
+                gpu_mb=0.0,
+                status="failed(exception)",
+                error="RuntimeError('bad input')",
+            ),
         ],
         eff_cpu_dir,
     )
-    write_model_csvs(
+    assert eff_cpu_csv == eff_cpu_dir / "results.csv"
+    assert not (eff_cpu_dir / "case_metrics.csv").exists()
+    assert not (eff_cpu_dir / "lesion_scores.csv").exists()
+
+    write_model_csv(
         [
             _make_record(
                 dataset="colon",
@@ -215,18 +253,27 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
                 device="cuda",
                 postprocess="moving_centroid",
                 load_s=0.3,
-                inf_s=0.2,
-                post_s=0.08,
+                lesions=[(1, 0.89, 101, 0.2, 0.08)],
                 wall_s=0.70,
-                dice1=0.89,
-                pred_vox1=101,
                 ram_mb=1200.0,
                 gpu_mb=2200.0,
-            )
+            ),
+            _make_record(
+                dataset="colon",
+                case_id="case_02",
+                model_name="EffMedSAM2",
+                device="cuda",
+                postprocess="moving_centroid",
+                load_s=0.3,
+                lesions=[(1, 0.86, 97, 0.25, 0.09), (2, 0.91, 100, 0.15, 0.06)],
+                wall_s=0.97,
+                ram_mb=1250.0,
+                gpu_mb=2400.0,
+            ),
         ],
         eff_gpu_dir,
     )
-    write_model_csvs(
+    write_model_csv(
         [
             _make_record(
                 dataset="colon",
@@ -235,18 +282,27 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="none",
                 load_s=0.6,
-                inf_s=2.4,
-                post_s=0.0,
+                lesions=[(1, 0.84, 110, 2.4, 0.0)],
                 wall_s=3.12,
-                dice1=0.84,
-                pred_vox1=110,
                 ram_mb=1500.0,
                 gpu_mb=0.0,
-            )
+            ),
+            _make_record(
+                dataset="colon",
+                case_id="case_02",
+                model_name="MedSAM2",
+                device="cpu",
+                postprocess="none",
+                load_s=0.6,
+                lesions=[(1, 0.80, 108, 2.2, 0.0), (2, 0.82, 105, 1.8, 0.0)],
+                wall_s=4.72,
+                ram_mb=1600.0,
+                gpu_mb=0.0,
+            ),
         ],
         med_dir,
     )
-    write_model_csvs(
+    write_model_csv(
         [
             _make_record(
                 dataset="colon",
@@ -255,34 +311,59 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="none",
                 load_s=0.5,
-                inf_s=3.5,
-                post_s=0.0,
+                lesions=[(1, 0.91, 98, 3.5, 0.0)],
                 wall_s=4.12,
-                dice1=0.91,
-                pred_vox1=98,
                 ram_mb=2100.0,
                 gpu_mb=0.0,
-            )
+            ),
         ],
         nn_dir,
     )
 
-    # Verify per-model CSV headers exclude post_* intermediates and use clear time names
-    with eff_cpu_csvs["case_metrics"].open() as f:
-        case_hdr = csv.DictReader(f).fieldnames or []
-    assert case_hdr == CASE_COLUMNS
-    assert not any(c.startswith("post_") or c == "mean_post_dice" for c in case_hdr)
-    assert "total_runtime_s" in case_hdr
-    assert "model_loading_time_s" in case_hdr
-    assert "model_inference_time_s" in case_hdr
-    assert "end_to_end_wall_time_including_io_s" in case_hdr
+    with eff_cpu_csv.open() as f:
+        reader = csv.DictReader(f)
+        eff_hdr = reader.fieldnames or []
+        eff_rows = list(reader)
+    assert eff_hdr == RESULT_COLUMNS
+    assert not any(c.startswith("post_") or c in ("total_runtime_s", "single_lesion_inference_time_s") for c in eff_hdr)
+    assert len(eff_rows) == 4  # 1 (case_01) + 2 (case_02) + 1 (case_03_err fallback)
 
-    with eff_cpu_csvs["lesion_scores"].open() as f:
-        lesion_hdr = csv.DictReader(f).fieldnames or []
-    assert lesion_hdr == LESION_COLUMNS
-    assert not any(c.startswith("post_") for c in lesion_hdr)
+    # Single-lesion case: model_inference_time_s == case inference time, Formula 1 holds
+    c1 = eff_rows[0]
+    assert np.isclose(float(c1["model_inference_time_s"]), 1.2)
+    assert np.isclose(float(c1["total_inference_time_s"]), 1.7)
 
-    # Run merge_csvs.py without PYTHONPATH
+    # Multi-lesion case (Option A): shared timings on lesion 1, zero on lesion 2; sums equal case total
+    c2_l1, c2_l2 = eff_rows[1], eff_rows[2]
+    assert float(c2_l1["model_loading_time_s"]) == 0.5
+    assert float(c2_l1["data_loading_time_s"]) == 0.05
+    assert float(c2_l1["image_preprocessing_time_s"]) == 0.04
+    assert float(c2_l1["output_saving_time_s"]) == 0.03
+    assert float(c2_l1["end_to_end_wall_time_including_io_s"]) == 2.72
+    assert float(c2_l1["model_inference_time_s"]) == 1.1
+    assert float(c2_l1["postprocessing_time_s"]) == 0.12
+    assert np.isclose(float(c2_l1["total_inference_time_s"]), 1.72)
+
+    assert float(c2_l2["model_loading_time_s"]) == 0.0
+    assert float(c2_l2["data_loading_time_s"]) == 0.0
+    assert float(c2_l2["image_preprocessing_time_s"]) == 0.0
+    assert float(c2_l2["output_saving_time_s"]) == 0.0
+    assert float(c2_l2["end_to_end_wall_time_including_io_s"]) == 0.0
+    assert float(c2_l2["model_inference_time_s"]) == 0.8
+    assert float(c2_l2["postprocessing_time_s"]) == 0.08
+    assert np.isclose(float(c2_l2["total_inference_time_s"]), 0.88)
+    assert np.isclose(
+        float(c2_l1["total_inference_time_s"]) + float(c2_l2["total_inference_time_s"]),
+        2.60,
+    )
+
+    # Failed case row
+    c3 = eff_rows[3]
+    assert c3["case_status"] == "failed(exception)"
+    assert c3["prediction_status"] == "failed"
+    assert "bad input" in c3["error_message"]
+
+    # Merge into a single metric-grouped CSV without PYTHONPATH
     merged_dir = tmp_path / "runs" / "merged"
     clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     merge_res = subprocess.run(
@@ -304,42 +385,54 @@ def test_per_model_csvs_and_wide_merge_cli(tmp_path: Path):
     )
     assert merge_res.returncode == 0, merge_res.stderr
 
-    merged_lesions_csv = merged_dir / "merged_lesion_scores.csv"
-    merged_cases_csv = merged_dir / "merged_case_metrics.csv"
-    summary_csv = merged_dir / "model_summary.csv"
-    assert merged_lesions_csv.is_file()
-    assert merged_cases_csv.is_file()
-    assert summary_csv.is_file()
+    merged_csv = merged_dir / "merged_results.csv"
+    assert merged_csv.is_file()
+    assert not (merged_dir / "merged_lesion_scores.csv").exists()
+    assert not (merged_dir / "merged_case_metrics.csv").exists()
+    assert not (merged_dir / "model_summary.csv").exists()
 
-    with merged_lesions_csv.open() as f:
-        lrows = list(csv.DictReader(f))
-    assert len(lrows) == 1
-    row = lrows[0]
-    assert row["case_id"] == "case_01"
-    assert row["gt_volume_ml"] == "0.2"
-    # Duplicate model_name on cpu/cuda auto-disambiguates; unique models use <ModelName>_
-    assert row["EffMedSAM2_cpu_dice"] == "0.88"
-    assert row["EffMedSAM2_cuda_dice"] == "0.89"
-    assert row["MedSAM2_dice"] == "0.84"
-    assert row["nnInteractive_box_dice"] == "0.91"
-    assert float(row["EffMedSAM2_cpu_pred_volume_ml"]) > 0.0
-    assert float(row["MedSAM2_pred_volume_ml"]) > 0.0
-    assert float(row["nnInteractive_box_single_lesion_inference_time_s"]) == 3.5
-    assert np.isclose(float(row["EffMedSAM2_cpu_total_runtime_s"]), 1.7)
-    assert np.isclose(float(row["MedSAM2_end_to_end_wall_time_including_io_s"]), 3.12)
-    assert not any("_post_" in k for k in row)
+    with merged_csv.open() as f:
+        mreader = csv.DictReader(f)
+        mhdr = mreader.fieldnames or []
+        mrows = list(mreader)
 
-    with merged_cases_csv.open() as f:
-        crows = list(csv.DictReader(f))
-    assert len(crows) == 1
-    assert crows[0]["EffMedSAM2_cpu_mean_dice"] == "0.88"
-    assert crows[0]["nnInteractive_box_mean_dice"] == "0.91"
-    assert float(crows[0]["EffMedSAM2_cuda_MaxGPU_Mem_MB"]) == 2200.0
+    expected_prefixes = ["EffMedSAM2_cpu", "EffMedSAM2_cuda", "MedSAM2", "nnInteractive_box"]
+    expected_cols = list(MERGED_SHARED_COLUMNS) + [
+        f"{pref}_{metric}" for metric in MERGED_METRIC_COLUMNS for pref in expected_prefixes
+    ]
+    assert mhdr == expected_cols
+    # Exactly one time column per model in the merged table
+    assert [c for c in mhdr if "time" in c] == [f"{pref}_total_inference_time_s" for pref in expected_prefixes]
 
-    with summary_csv.open() as f:
-        srows = list(csv.DictReader(f))
-    assert len(srows) == 4
-    assert "mean_total_runtime_s" in srows[0]
-    assert "mean_model_loading_time_s" in srows[0]
-    assert "mean_model_inference_time_s" in srows[0]
-    assert "mean_end_to_end_wall_time_including_io_s" in srows[0]
+    assert len(mrows) == 4  # case_01 (id 1), case_02 (id 1, id 2), case_03_err (empty lesion_id)
+    r0 = mrows[0]
+    assert r0["case_id"] == "case_01"
+    assert r0["lesion_id"] == "1"
+    assert r0["ground_truth_volume_ml"] == "0.2"
+    assert r0["EffMedSAM2_cpu_dice_score"] == "0.88"
+    assert r0["EffMedSAM2_cuda_dice_score"] == "0.89"
+    assert r0["MedSAM2_dice_score"] == "0.84"
+    assert r0["nnInteractive_box_dice_score"] == "0.91"
+    assert np.isclose(float(r0["EffMedSAM2_cpu_total_inference_time_s"]), 1.7)
+    assert np.isclose(float(r0["MedSAM2_total_inference_time_s"]), 3.0)
+    assert float(r0["EffMedSAM2_cuda_peak_gpu_memory_mb"]) == 2200.0
+
+    # Also check direct .csv path via -o out/custom.csv
+    custom_csv = tmp_path / "custom_out" / "compare.csv"
+    res2 = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "merge_csvs.py"),
+            "-i",
+            str(eff_cpu_dir / "results.csv"),
+            str(med_dir / "results.csv"),
+            "-o",
+            str(custom_csv),
+        ],
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res2.returncode == 0, res2.stderr
+    assert custom_csv.is_file()

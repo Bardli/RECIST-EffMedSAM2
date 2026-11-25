@@ -1,86 +1,29 @@
-"""Per-model CSV reporting and wide multi-model CSV merging."""
+"""Single-file per-model CSV reporting (``results.csv``) and wide comparison merge (``merged_results.csv``)."""
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
-from statistics import mean, median, pstdev
+from statistics import mean
 from typing import Any
 
 import numpy as np
 
-CASE_COLUMNS = [
+RESULT_COLUMNS = [
     "dataset",
     "case_id",
-    "model_name",
-    "device",
-    "physical_gpu_index",
-    "num_threads",
-    "postprocess",
-    "status",
-    "error",
-    "n_lesions",
-    "shape_zyx",
-    "spacing_xyz",
-    "mean_dice",
-    "total_runtime_s",
-    "model_loading_time_s",
-    "model_inference_time_s",
-    "postprocessing_time_s",
-    "data_loading_time_s",
-    "image_preprocessing_time_s",
-    "output_saving_time_s",
-    "end_to_end_wall_time_including_io_s",
-    "MaxRAM_MB",
-    "ram_baseline_mb",
-    "ram_inference_peak_mb",
-    "ram_delta_mb",
-    "AUC_RAM_Time_MB_s",
-    "MaxCPU_Utilization_pct",
-    "AUC_CPU_Time_pct_s",
-    "MaxGPU_Mem_MB",
-    "gpu_nvml_peak_mb",
-    "AUC_GPU_Time_MB_s",
-    "RankGPU_Mem_MB",
-    "gpu_torch_peak_allocated_mb",
-    "gpu_torch_peak_reserved_mb",
-    "gpu_monitor_status",
-    "gpu_sanity_ok",
-]
-
-LESION_COLUMNS = [
-    "dataset",
-    "case_id",
-    "gt_id",
+    "lesion_id",
     "recist_id",
-    "gt_voxels",
-    "gt_volume_ml",
     "model_name",
     "device",
     "postprocess",
+    "case_status",
     "prediction_status",
-    "pred_voxels",
-    "pred_volume_ml",
-    "intersection",
-    "dice",
-    "single_lesion_inference_time_s",
-    "model_loading_time_s",
-    "model_inference_time_s",
-    "postprocessing_time_s",
-    "total_runtime_s",
-    "end_to_end_wall_time_including_io_s",
-    "MaxRAM_MB",
-    "MaxGPU_Mem_MB",
-    "gpu_monitor_status",
-    "gpu_sanity_ok",
-]
-
-MERGED_CASE_SHARED = ["dataset", "case_id", "n_lesions", "shape_zyx", "spacing_xyz"]
-MERGED_CASE_MODEL_FIELDS = [
-    "device",
-    "status",
-    "mean_dice",
-    "total_runtime_s",
+    "ground_truth_voxels",
+    "ground_truth_volume_ml",
+    "predicted_voxels",
+    "predicted_volume_ml",
+    "dice_score",
+    "total_inference_time_s",
     "model_loading_time_s",
     "model_inference_time_s",
     "postprocessing_time_s",
@@ -88,56 +31,28 @@ MERGED_CASE_MODEL_FIELDS = [
     "image_preprocessing_time_s",
     "output_saving_time_s",
     "end_to_end_wall_time_including_io_s",
-    "MaxRAM_MB",
-    "AUC_RAM_Time_MB_s",
-    "MaxCPU_Utilization_pct",
-    "MaxGPU_Mem_MB",
-    "RankGPU_Mem_MB",
+    "peak_ram_mb",
+    "peak_cpu_utilization_pct",
+    "peak_gpu_memory_mb",
     "gpu_monitor_status",
     "gpu_sanity_ok",
+    "error_message",
 ]
 
-MERGED_LESION_SHARED = ["dataset", "case_id", "gt_id", "recist_id", "gt_voxels", "gt_volume_ml"]
-MERGED_LESION_MODEL_FIELDS = [
-    "prediction_status",
-    "pred_voxels",
-    "pred_volume_ml",
-    "intersection",
-    "dice",
-    "single_lesion_inference_time_s",
-    "model_loading_time_s",
-    "model_inference_time_s",
-    "postprocessing_time_s",
-    "total_runtime_s",
-    "end_to_end_wall_time_including_io_s",
-    "MaxRAM_MB",
-    "MaxGPU_Mem_MB",
+MERGED_SHARED_COLUMNS = [
+    "dataset",
+    "case_id",
+    "lesion_id",
+    "recist_id",
+    "ground_truth_volume_ml",
 ]
 
-SUMMARY_COLUMNS = [
-    "model_name",
-    "device",
-    "cases_total",
-    "cases_ok",
-    "cases_failed",
-    "lesions_total",
-    "mean_dice",
-    "median_dice",
-    "std_dice",
-    "mean_total_runtime_s",
-    "mean_model_loading_time_s",
-    "mean_model_inference_time_s",
-    "mean_postprocessing_time_s",
-    "mean_end_to_end_wall_time_including_io_s",
-    "mean_MaxRAM_MB",
-    "max_MaxRAM_MB",
-    "mean_AUC_RAM_Time_MB_s",
-    "mean_MaxCPU_Utilization_pct",
-    "mean_MaxGPU_Mem_MB",
-    "mean_AUC_GPU_Time_MB_s",
-    "mean_RankGPU_Mem_MB",
-    "gpu_monitor_statuses",
-    "all_gpu_sanity_ok",
+MERGED_METRIC_COLUMNS = [
+    "dice_score",
+    "predicted_volume_ml",
+    "total_inference_time_s",
+    "peak_ram_mb",
+    "peak_gpu_memory_mb",
 ]
 
 
@@ -160,20 +75,37 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) ->
         writer.writerows(rows)
 
 
-def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        return list(reader.fieldnames or []), list(reader)
+        return list(csv.DictReader(f))
 
 
-def records_to_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Convert per-case JSON records into flat case and lesion CSV row dicts."""
-    case_rows: list[dict[str, Any]] = []
-    lesion_rows: list[dict[str, Any]] = []
+def _lookup_lesion_time(
+    time_map: dict[str, Any],
+    recist_id: Any,
+    lesion_id: int,
+    case_total_s: float,
+    is_first: bool,
+) -> float:
+    if not time_map:
+        return round(case_total_s, 6) if is_first else 0.0
+    candidates: list[str] = []
+    if recist_id not in (None, ""):
+        candidates.append(str(recist_id))
+    candidates.append(str(lesion_id))
+    for key in candidates:
+        if key in time_map and time_map[key] not in ("", None):
+            return round(float(time_map[key]), 6)
+    return 0.0
+
+
+def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten case records into one row per RECIST lesion using Option A shared timings."""
+    out_rows: list[dict[str, Any]] = []
 
     for record in records:
         metrics = dict(record.get("metrics", {}))
-        status = record.get("status", "ok")
+        status = str(record.get("status", "ok"))
         model_name = record.get("model_name") or record.get("model", "")
         dataset = record.get("dataset", "")
         case_id = record.get("case_id", "")
@@ -181,110 +113,149 @@ def records_to_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
         postprocess = record.get("postprocess", "none")
         spacing = record.get("spacing_xyz", [])
         rows = list(record.get("rows", []))
-        lesion_times = record.get("per_lesion_inference_time_s", {})
+        lesion_inf_times = dict(record.get("per_lesion_inference_time_s", {}))
+        lesion_post_times = dict(record.get("per_lesion_postprocessing_time_s", {}))
         voxel_ml = _voxel_volume_ml(spacing) if spacing else float("nan")
-        dices = [float(r["dice"]) for r in rows if r.get("dice") is not None]
 
-        case_row: dict[str, Any] = {
-            "dataset": dataset,
-            "case_id": case_id,
-            "model_name": model_name,
-            "device": device,
-            "physical_gpu_index": _fmt_opt(record.get("physical_gpu_index")),
-            "num_threads": _fmt_opt(record.get("num_threads")),
-            "postprocess": postprocess,
-            "status": status,
-            "error": record.get("error", ""),
-            "n_lesions": record.get("n_lesions", len(rows)),
-            "shape_zyx": json.dumps(record.get("shape_zyx", [])) if record.get("shape_zyx") else "",
-            "spacing_xyz": json.dumps(spacing) if spacing else "",
-            "mean_dice": round(mean(dices), 6) if dices else "",
-        }
-        for col in CASE_COLUMNS:
-            if col not in case_row:
-                case_row[col] = _fmt_opt(metrics.get(col))
-        case_rows.append(case_row)
+        case_load_s = float(metrics.get("model_loading_time_s") or 0.0)
+        case_inf_s = float(metrics.get("model_inference_time_s") or 0.0)
+        case_post_s = float(metrics.get("postprocessing_time_s") or 0.0)
+        case_data_s = float(metrics.get("data_loading_time_s") or 0.0)
+        case_pre_s = float(metrics.get("image_preprocessing_time_s") or 0.0)
+        case_save_s = float(metrics.get("output_saving_time_s") or 0.0)
+        case_wall_s = float(metrics.get("end_to_end_wall_time_including_io_s") or 0.0)
 
-        for r in rows:
+        peak_ram_mb = _fmt_opt(metrics.get("MaxRAM_MB"))
+        peak_cpu_pct = _fmt_opt(metrics.get("MaxCPU_Utilization_pct"))
+        peak_gpu_mb = _fmt_opt(metrics.get("MaxGPU_Mem_MB"))
+        gpu_status = metrics.get("gpu_monitor_status", "")
+        gpu_sanity = _fmt_opt(metrics.get("gpu_sanity_ok"))
+        err_msg = record.get("error", "")
+
+        if not rows:
+            out_rows.append(
+                {
+                    "dataset": dataset,
+                    "case_id": case_id,
+                    "lesion_id": "",
+                    "recist_id": "",
+                    "model_name": model_name,
+                    "device": device,
+                    "postprocess": postprocess,
+                    "case_status": status,
+                    "prediction_status": "failed" if status != "ok" else "no_lesions",
+                    "ground_truth_voxels": "",
+                    "ground_truth_volume_ml": "",
+                    "predicted_voxels": "",
+                    "predicted_volume_ml": "",
+                    "dice_score": "",
+                    "total_inference_time_s": round(case_load_s + case_inf_s + case_post_s, 6),
+                    "model_loading_time_s": round(case_load_s, 6),
+                    "model_inference_time_s": round(case_inf_s, 6),
+                    "postprocessing_time_s": round(case_post_s, 6),
+                    "data_loading_time_s": round(case_data_s, 6),
+                    "image_preprocessing_time_s": round(case_pre_s, 6),
+                    "output_saving_time_s": round(case_save_s, 6),
+                    "end_to_end_wall_time_including_io_s": round(case_wall_s, 6),
+                    "peak_ram_mb": peak_ram_mb,
+                    "peak_cpu_utilization_pct": peak_cpu_pct,
+                    "peak_gpu_memory_mb": peak_gpu_mb,
+                    "gpu_monitor_status": gpu_status,
+                    "gpu_sanity_ok": gpu_sanity,
+                    "error_message": err_msg,
+                }
+            )
+            continue
+
+        single_lesion_case = len(rows) == 1
+        for row_idx, r in enumerate(rows):
+            is_first = row_idx == 0
             gid = int(r["gt_id"])
+            rid = r.get("recist_id")
             gt_vox = r.get("gt_voxels")
             pred_vox = r.get("pred_voxels")
             gt_vol_ml = round(gt_vox * voxel_ml, 6) if (gt_vox is not None and np.isfinite(voxel_ml)) else ""
             pred_vol_ml = round(pred_vox * voxel_ml, 6) if (pred_vox is not None and np.isfinite(voxel_ml)) else ""
-            lesion_rows.append(
+
+            row_load_s = round(case_load_s, 6) if is_first else 0.0
+            row_data_s = round(case_data_s, 6) if is_first else 0.0
+            row_pre_s = round(case_pre_s, 6) if is_first else 0.0
+            row_save_s = round(case_save_s, 6) if is_first else 0.0
+            row_wall_s = round(case_wall_s, 6) if is_first else 0.0
+
+            if single_lesion_case:
+                row_inf_s = round(case_inf_s, 6)
+                row_post_s = round(case_post_s, 6)
+            else:
+                row_inf_s = _lookup_lesion_time(lesion_inf_times, rid, gid, case_inf_s, is_first)
+                row_post_s = _lookup_lesion_time(lesion_post_times, rid, gid, case_post_s, is_first)
+
+            row_total_inf_s = round(row_load_s + row_inf_s + row_post_s, 6)
+
+            out_rows.append(
                 {
                     "dataset": dataset,
                     "case_id": case_id,
-                    "gt_id": gid,
-                    "recist_id": _fmt_opt(r.get("recist_id")),
-                    "gt_voxels": _fmt_opt(gt_vox),
-                    "gt_volume_ml": gt_vol_ml,
+                    "lesion_id": gid,
+                    "recist_id": _fmt_opt(rid),
                     "model_name": model_name,
                     "device": device,
                     "postprocess": postprocess,
+                    "case_status": status,
                     "prediction_status": r.get("status", ""),
-                    "pred_voxels": _fmt_opt(pred_vox),
-                    "pred_volume_ml": pred_vol_ml,
-                    "intersection": _fmt_opt(r.get("intersection")),
-                    "dice": round(float(r["dice"]), 6) if r.get("dice") is not None else "",
-                    "single_lesion_inference_time_s": lesion_times.get(str(gid), ""),
-                    "model_loading_time_s": _fmt_opt(metrics.get("model_loading_time_s")),
-                    "model_inference_time_s": _fmt_opt(metrics.get("model_inference_time_s")),
-                    "postprocessing_time_s": _fmt_opt(metrics.get("postprocessing_time_s")),
-                    "total_runtime_s": _fmt_opt(metrics.get("total_runtime_s")),
-                    "end_to_end_wall_time_including_io_s": _fmt_opt(
-                        metrics.get("end_to_end_wall_time_including_io_s")
-                    ),
-                    "MaxRAM_MB": _fmt_opt(metrics.get("MaxRAM_MB")),
-                    "MaxGPU_Mem_MB": _fmt_opt(metrics.get("MaxGPU_Mem_MB")),
-                    "gpu_monitor_status": metrics.get("gpu_monitor_status", ""),
-                    "gpu_sanity_ok": _fmt_opt(metrics.get("gpu_sanity_ok")),
+                    "ground_truth_voxels": _fmt_opt(gt_vox),
+                    "ground_truth_volume_ml": gt_vol_ml,
+                    "predicted_voxels": _fmt_opt(pred_vox),
+                    "predicted_volume_ml": pred_vol_ml,
+                    "dice_score": round(float(r["dice"]), 6) if r.get("dice") is not None else "",
+                    "total_inference_time_s": row_total_inf_s,
+                    "model_loading_time_s": row_load_s,
+                    "model_inference_time_s": row_inf_s,
+                    "postprocessing_time_s": row_post_s,
+                    "data_loading_time_s": row_data_s,
+                    "image_preprocessing_time_s": row_pre_s,
+                    "output_saving_time_s": row_save_s,
+                    "end_to_end_wall_time_including_io_s": row_wall_s,
+                    "peak_ram_mb": peak_ram_mb,
+                    "peak_cpu_utilization_pct": peak_cpu_pct,
+                    "peak_gpu_memory_mb": peak_gpu_mb,
+                    "gpu_monitor_status": gpu_status,
+                    "gpu_sanity_ok": gpu_sanity,
+                    "error_message": err_msg,
                 }
             )
 
-    return case_rows, lesion_rows
+    return out_rows
 
 
-def write_model_csvs(records: list[dict[str, Any]], output_dir: str | Path) -> dict[str, Path]:
-    """Write independent per-model ``case_metrics.csv`` and ``lesion_scores.csv``."""
+def write_model_csv(records: list[dict[str, Any]], output_dir: str | Path) -> Path:
+    """Write a single per-model ``results.csv`` with one row per RECIST lesion."""
     out_dir = Path(output_dir).resolve()
-    case_rows, lesion_rows = records_to_rows(records)
-    case_csv = out_dir / "case_metrics.csv"
-    lesion_csv = out_dir / "lesion_scores.csv"
-    _write_csv(case_csv, CASE_COLUMNS, case_rows)
-    _write_csv(lesion_csv, LESION_COLUMNS, lesion_rows)
-    return {"case_metrics": case_csv, "lesion_scores": lesion_csv}
+    csv_path = out_dir / "results.csv"
+    _write_csv(csv_path, RESULT_COLUMNS, records_to_rows(records))
+    return csv_path
 
 
-def _load_input_csvs(inputs: list[Path]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    all_case_rows: list[dict[str, Any]] = []
-    all_lesion_rows: list[dict[str, Any]] = []
+def _load_result_csvs(inputs: list[Path]) -> list[dict[str, Any]]:
+    all_rows: list[dict[str, Any]] = []
     seen_files: set[Path] = set()
 
     for raw_p in inputs:
         p = Path(raw_p).resolve()
         if p.is_dir():
-            for fname, target in (("case_metrics.csv", all_case_rows), ("lesion_scores.csv", all_lesion_rows)):
-                csv_path = p / fname
-                if csv_path.is_file() and csv_path not in seen_files:
-                    seen_files.add(csv_path)
-                    _, rows = _read_csv(csv_path)
-                    for idx, row in enumerate(rows):
-                        row["_source_order"] = f"{p.name}:{idx}"
-                    target.extend(rows)
+            csv_path = p / "results.csv"
+            if not csv_path.is_file():
+                raise FileNotFoundError(f"results.csv not found in model directory: {p}")
         elif p.is_file():
-            if p in seen_files:
-                continue
-            seen_files.add(p)
-            cols, rows = _read_csv(p)
-            if "gt_id" in cols:
-                all_lesion_rows.extend(rows)
-            else:
-                all_case_rows.extend(rows)
+            csv_path = p
         else:
             raise FileNotFoundError(f"Merge input does not exist: {raw_p}")
 
-    return all_case_rows, all_lesion_rows
+        if csv_path not in seen_files:
+            seen_files.add(csv_path)
+            all_rows.extend(_read_csv(csv_path))
+
+    return all_rows
 
 
 def _assign_group_prefixes(groups: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
@@ -308,22 +279,65 @@ def _assign_group_prefixes(groups: list[tuple[str, str]]) -> dict[tuple[str, str
     return prefixes
 
 
-def _lesion_sort_key(k: tuple[str, str, str]) -> tuple[str, str, int, str]:
-    ds, cid, gid = k
+def _lesion_sort_key(k: tuple[str, str, str]) -> tuple[str, str, int, int, str]:
+    ds, cid, lid = k
+    if lid == "":
+        return (ds, cid, 1, 0, lid)
     try:
-        return (ds, cid, int(gid), gid)
+        return (ds, cid, 0, int(lid), lid)
     except ValueError:
-        return (ds, cid, 0, gid)
+        return (ds, cid, 0, 0, lid)
 
 
-def _merge_wide_table(
-    rows: list[dict[str, Any]],
-    *,
-    key_fields: tuple[str, ...],
-    shared_fields: list[str],
-    model_fields: list[str],
-    sort_fn,
-) -> tuple[list[str], list[dict[str, Any]]]:
+def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Compute compact per-model console summary stats without writing extra CSV files."""
+    prefixes = _assign_group_prefixes(groups)
+    summaries: list[dict[str, Any]] = []
+    for grp in groups:
+        mname, device = grp
+        grp_rows = [
+            r
+            for r in rows
+            if (str(r.get("model_name", "") or "model"), str(r.get("device", ""))) == grp
+        ]
+        ok_rows = [r for r in grp_rows if r.get("case_status") == "ok"]
+        case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in grp_rows}
+        ok_case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in ok_rows}
+        dices = [float(r["dice_score"]) for r in ok_rows if r.get("dice_score", "") not in ("", None)]
+        tot_times = [
+            float(r["total_inference_time_s"])
+            for r in ok_rows
+            if r.get("total_inference_time_s", "") not in ("", None)
+        ]
+        rams = [float(r["peak_ram_mb"]) for r in ok_rows if r.get("peak_ram_mb", "") not in ("", None)]
+        gpus = [float(r["peak_gpu_memory_mb"]) for r in ok_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
+        summaries.append(
+            {
+                "column_prefix": prefixes[grp],
+                "model_name": mname,
+                "device": device,
+                "cases": len(case_keys),
+                "lesions": sum(1 for r in grp_rows if str(r.get("lesion_id", "")) != ""),
+                "mean_dice_score": round(mean(dices), 4) if dices else None,
+                "mean_case_total_inference_time_s": (
+                    round(sum(tot_times) / len(ok_case_keys), 4) if tot_times and ok_case_keys else None
+                ),
+                "max_peak_ram_mb": round(max(rams), 1) if rams else None,
+                "max_peak_gpu_memory_mb": round(max(gpus), 1) if gpus else None,
+            }
+        )
+    return summaries
+
+
+def merge_model_csvs(
+    input_paths: list[str | Path],
+    output_path: str | Path,
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Merge per-model ``results.csv`` files into one metric-grouped wide comparison CSV."""
+    rows = _load_result_csvs([Path(p) for p in input_paths])
+    if not rows:
+        raise FileNotFoundError("No rows found in input results.csv files")
+
     groups: list[tuple[str, str]] = []
     seen_groups: set[tuple[str, str]] = set()
     for r in rows:
@@ -333,174 +347,35 @@ def _merge_wide_table(
             groups.append(grp)
     prefixes = _assign_group_prefixes(groups)
 
-    bucket_shared: dict[tuple[str, ...], dict[str, Any]] = {}
-    bucket_models: dict[tuple[str, ...], dict[tuple[str, str], dict[str, Any]]] = {}
+    key_fields = ("dataset", "case_id", "lesion_id")
+    bucket_shared: dict[tuple[str, str, str], dict[str, Any]] = {}
+    bucket_models: dict[tuple[str, str, str], dict[tuple[str, str], dict[str, Any]]] = {}
+
     for r in rows:
-        key = tuple(str(r.get(f, "")) for f in key_fields)
+        key = (str(r.get(key_fields[0], "")), str(r.get(key_fields[1], "")), str(r.get(key_fields[2], "")))
         grp = (str(r.get("model_name", "") or "model"), str(r.get("device", "")))
         sh = bucket_shared.setdefault(key, {})
-        for sf in shared_fields:
+        for sf in MERGED_SHARED_COLUMNS:
             if not sh.get(sf) and r.get(sf, "") not in ("", None):
                 sh[sf] = r[sf]
         bucket_models.setdefault(key, {})[grp] = r
 
-    columns = list(shared_fields)
-    for grp in groups:
-        pref = prefixes[grp]
-        for mf in model_fields:
-            columns.append(f"{pref}_{mf}")
-
-    out_rows: list[dict[str, Any]] = []
-    for key in sorted(bucket_shared, key=sort_fn):
-        row: dict[str, Any] = {sf: bucket_shared[key].get(sf, "") for sf in shared_fields}
+    # Group columns by metric across models so models sit side-by-side for direct comparison.
+    columns = list(MERGED_SHARED_COLUMNS)
+    for metric in MERGED_METRIC_COLUMNS:
         for grp in groups:
-            pref = prefixes[grp]
-            src = bucket_models.get(key, {}).get(grp, {})
-            for mf in model_fields:
-                row[f"{pref}_{mf}"] = src.get(mf, "")
-        out_rows.append(row)
-    return columns, out_rows
+            columns.append(f"{prefixes[grp]}_{metric}")
 
+    merged_rows: list[dict[str, Any]] = []
+    for key in sorted(bucket_shared, key=_lesion_sort_key):
+        row: dict[str, Any] = {sf: bucket_shared[key].get(sf, "") for sf in MERGED_SHARED_COLUMNS}
+        for metric in MERGED_METRIC_COLUMNS:
+            for grp in groups:
+                src = bucket_models.get(key, {}).get(grp, {})
+                row[f"{prefixes[grp]}_{metric}"] = src.get(metric, "")
+        merged_rows.append(row)
 
-def _build_summary_rows(
-    case_rows: list[dict[str, Any]],
-    lesion_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    groups: list[tuple[str, str]] = []
-    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for r in case_rows:
-        grp = (str(r.get("model_name", "")), str(r.get("device", "")))
-        if grp not in buckets:
-            buckets[grp] = []
-            groups.append(grp)
-        buckets[grp].append(r)
-
-    summary_rows: list[dict[str, Any]] = []
-    for model_name, device in sorted(groups):
-        rows_group = buckets[(model_name, device)]
-        ok_rows = [r for r in rows_group if r.get("status") == "ok"]
-        model_lesions = [
-            float(lr["dice"])
-            for lr in lesion_rows
-            if str(lr.get("model_name", "")) == model_name
-            and str(lr.get("device", "")) == device
-            and lr.get("dice", "") != ""
-        ]
-
-        def _vals(col: str) -> list[float]:
-            return [float(r[col]) for r in ok_rows if r.get(col, "") not in ("", None)]
-
-        rt_vals = _vals("total_runtime_s")
-        load_vals = _vals("model_loading_time_s")
-        inf_vals = _vals("model_inference_time_s")
-        post_vals = _vals("postprocessing_time_s")
-        wall_vals = _vals("end_to_end_wall_time_including_io_s")
-        ram_vals = _vals("MaxRAM_MB")
-        auc_ram_vals = _vals("AUC_RAM_Time_MB_s")
-        cpu_vals = _vals("MaxCPU_Utilization_pct")
-        gpu_vals = _vals("MaxGPU_Mem_MB")
-        auc_gpu_vals = _vals("AUC_GPU_Time_MB_s")
-        rank_gpu_vals = _vals("RankGPU_Mem_MB")
-
-        raw_sanity = [
-            r.get("gpu_sanity_ok", "")
-            for r in ok_rows
-            if r.get("gpu_sanity_ok", "") not in ("", None)
-        ]
-        norm_sanity = [
-            v if isinstance(v, bool) else str(v).strip().lower() == "true"
-            for v in raw_sanity
-        ]
-        if not ok_rows or not norm_sanity:
-            all_sanity: Any = ""
-        elif any(not v for v in norm_sanity):
-            all_sanity = False
-        elif len(norm_sanity) < len(ok_rows):
-            all_sanity = ""
-        else:
-            all_sanity = True
-
-        statuses_seen = sorted(
-            {str(r["gpu_monitor_status"]) for r in rows_group if r.get("gpu_monitor_status")}
-        )
-        summary_rows.append(
-            {
-                "model_name": model_name,
-                "device": device,
-                "cases_total": len(rows_group),
-                "cases_ok": len(ok_rows),
-                "cases_failed": len(rows_group) - len(ok_rows),
-                "lesions_total": len(
-                    [
-                        lr
-                        for lr in lesion_rows
-                        if str(lr.get("model_name", "")) == model_name
-                        and str(lr.get("device", "")) == device
-                    ]
-                ),
-                "mean_dice": round(mean(model_lesions), 6) if model_lesions else "",
-                "median_dice": round(median(model_lesions), 6) if model_lesions else "",
-                "std_dice": (
-                    round(pstdev(model_lesions), 6)
-                    if len(model_lesions) > 1
-                    else ("0.0" if model_lesions else "")
-                ),
-                "mean_total_runtime_s": round(mean(rt_vals), 4) if rt_vals else "",
-                "mean_model_loading_time_s": round(mean(load_vals), 4) if load_vals else "",
-                "mean_model_inference_time_s": round(mean(inf_vals), 4) if inf_vals else "",
-                "mean_postprocessing_time_s": round(mean(post_vals), 4) if post_vals else "",
-                "mean_end_to_end_wall_time_including_io_s": round(mean(wall_vals), 4) if wall_vals else "",
-                "mean_MaxRAM_MB": round(mean(ram_vals), 2) if ram_vals else "",
-                "max_MaxRAM_MB": round(max(ram_vals), 2) if ram_vals else "",
-                "mean_AUC_RAM_Time_MB_s": round(mean(auc_ram_vals), 2) if auc_ram_vals else "",
-                "mean_MaxCPU_Utilization_pct": round(mean(cpu_vals), 2) if cpu_vals else "",
-                "mean_MaxGPU_Mem_MB": round(mean(gpu_vals), 2) if gpu_vals else "",
-                "mean_AUC_GPU_Time_MB_s": round(mean(auc_gpu_vals), 2) if auc_gpu_vals else "",
-                "mean_RankGPU_Mem_MB": round(mean(rank_gpu_vals), 2) if rank_gpu_vals else "",
-                "gpu_monitor_statuses": ";".join(statuses_seen),
-                "all_gpu_sanity_ok": all_sanity,
-            }
-        )
-    return summary_rows
-
-
-def merge_model_csvs(
-    input_paths: list[str | Path],
-    output_dir: str | Path,
-) -> dict[str, Path]:
-    """Merge independent per-model CSVs horizontally (with ``<ModelName>_`` prefixes) + summary."""
-    out_dir = Path(output_dir).resolve()
-    case_rows, lesion_rows = _load_input_csvs([Path(p) for p in input_paths])
-    if not case_rows and not lesion_rows:
-        raise FileNotFoundError("No case_metrics.csv or lesion_scores.csv rows found in inputs")
-
-    written: dict[str, Path] = {}
-    if case_rows:
-        case_cols, merged_cases = _merge_wide_table(
-            case_rows,
-            key_fields=("dataset", "case_id"),
-            shared_fields=MERGED_CASE_SHARED,
-            model_fields=MERGED_CASE_MODEL_FIELDS,
-            sort_fn=lambda k: k,
-        )
-        merged_case_csv = out_dir / "merged_case_metrics.csv"
-        _write_csv(merged_case_csv, case_cols, merged_cases)
-        written["merged_case_metrics"] = merged_case_csv
-
-        summary_csv = out_dir / "model_summary.csv"
-        _write_csv(summary_csv, SUMMARY_COLUMNS, _build_summary_rows(case_rows, lesion_rows))
-        written["model_summary"] = summary_csv
-
-    if lesion_rows:
-        lesion_cols, merged_lesions = _merge_wide_table(
-            lesion_rows,
-            key_fields=("dataset", "case_id", "gt_id"),
-            shared_fields=MERGED_LESION_SHARED,
-            model_fields=MERGED_LESION_MODEL_FIELDS,
-            sort_fn=_lesion_sort_key,
-        )
-        merged_lesion_csv = out_dir / "merged_lesion_scores.csv"
-        _write_csv(merged_lesion_csv, lesion_cols, merged_lesions)
-        written["merged_lesion_scores"] = merged_lesion_csv
-
-    return written
+    out = Path(output_path).resolve()
+    merged_csv = out if out.suffix.lower() == ".csv" else (out / "merged_results.csv")
+    _write_csv(merged_csv, columns, merged_rows)
+    return merged_csv, _summarize_groups(rows, groups)

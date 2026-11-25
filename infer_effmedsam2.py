@@ -92,7 +92,7 @@ def main() -> int:
     import torch
     from efficient_track_anything.build_efficienttam import build_efficienttam_video_predictor_npz
 
-    from utils.csv_io import write_model_csvs
+    from utils.csv_io import write_model_csv
     from utils.ct_inputs import (
         abdomen_image,
         auto_window_dir,
@@ -104,7 +104,7 @@ def main() -> int:
     from utils.device_memory import reset_cuda_peaks
     from utils.monitor import CaseProfiler, plot_case, write_json_atomic
     from utils.postprocess import finalize_and_save_predictions
-    from utils.prompts import recist_bbox, recist_diameter
+    from utils.prompts import find_recist_slices, recist_bbox, recist_diameter
     from utils.storage import IndependentPredictionWriter, sha256
 
     if args.device == "cpu" and torch.cuda.is_available():
@@ -164,7 +164,7 @@ def main() -> int:
             gpu_tolerance_mb=args.gpu_tolerance_mb,
         ) as profiler:
             try:
-                # 1. Model loading (counted in total_runtime_s)
+                # 1. Model loading (counted in total_inference_time_s)
                 with profiler.phase("model_loading_time"):
                     overrides = (
                         []
@@ -178,7 +178,7 @@ def main() -> int:
                         hydra_overrides_extra=overrides,
                     )
 
-                # 2. Data load & decompression (excluded from total_runtime_s)
+                # 2. Data load & decompression (excluded from total_inference_time_s)
                 with profiler.phase("data_loading_time"):
                     win_npz = resolve_window_npz(case_path, args.input_dir, window_dir)
                     with np.load(case_path, allow_pickle=False) as npz_data:
@@ -193,7 +193,7 @@ def main() -> int:
                     if img_3d.shape != recist.shape:
                         raise ValueError(f"Image shape {img_3d.shape} != RECIST shape {recist.shape}")
 
-                # 3. Resize + RGB + ImageNet normalization (excluded from total_runtime_s)
+                # 3. Resize + RGB + ImageNet norm + RECIST prompt extraction (excluded from total_inference_time_s)
                 with profiler.phase("image_preprocessing_time"):
                     video_height, video_width = img_3d.shape[1], img_3d.shape[2]
                     if (video_height, video_width) != (IMAGE_SIZE, IMAGE_SIZE):
@@ -204,7 +204,22 @@ def main() -> int:
                     img_tensor -= torch.tensor(IMAGENET_MEAN, dtype=torch.float32)[:, None, None]
                     img_tensor /= torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
 
-                unique_labs = [int(x) for x in np.unique(recist) if x != 0]
+                    slices_by_label = find_recist_slices(recist)
+                    prepared_prompts: list[tuple[int, int, int, int, int, np.ndarray]] = []
+                    for ulab, z_indices in slices_by_label.items():
+                        if len(z_indices) != 1:
+                            raise ValueError(f"Expected 1 RECIST slice for ID {ulab}, got {z_indices}")
+                        z_mid_orig = z_indices[0]
+                        recist_2d = (recist[z_mid_orig] == ulab).astype(np.uint8)
+                        diameter = recist_diameter(recist_2d)
+                        z_span = diameter * (((spacing[0] + spacing[1]) / 2.0) / spacing[2])
+                        half_z = int(z_span * Z_SLAB_SCALE / 2.0)
+                        z_lo = max(0, z_mid_orig - half_z)
+                        z_hi = min(img_3d.shape[0] - 1, z_mid_orig + half_z)
+                        z_mid = z_mid_orig - z_lo
+                        box_2d = recist_bbox(recist_2d, scale=BOX_SCALE, shift=args.shift)
+                        prepared_prompts.append((ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d))
+
                 metadata = {
                     "dataset": dataset_label,
                     "case_id": case_id,
@@ -225,30 +240,15 @@ def main() -> int:
                     metadata=metadata,
                     scratch=args.scratch,
                 ) as writer:
-                    # 4. Pure model inference (counted in total_runtime_s)
+                    # 4. Pure model inference (counted in total_inference_time_s)
                     with profiler.phase("model_inference_time"):
                         with torch.inference_mode():
-                            for ulab in unique_labs:
-                                recist_per_lab = (recist == ulab) * ulab
-                                z_indices = np.unique(np.where(recist == ulab)[0])
-                                if len(z_indices) != 1:
-                                    raise ValueError(f"Expected 1 RECIST slice for ID {ulab}, got {z_indices.tolist()}")
-                                z_mid_orig = int(z_indices[0])
-                                diameter = recist_diameter(recist_per_lab[z_mid_orig])
-                                z_span = diameter * (((spacing[0] + spacing[1]) / 2.0) / spacing[2])
-                                half_z = int(z_span * Z_SLAB_SCALE / 2.0)
-                                z_lo = max(0, z_mid_orig - half_z)
-                                z_hi = min(img_3d.shape[0] - 1, z_mid_orig + half_z)
-
-                                recist_crop = recist_per_lab[z_lo : z_hi + 1]
-                                img_crop = img_tensor[z_lo : z_hi + 1]
-                                z_mid = z_mid_orig - z_lo
-                                box_2d = recist_bbox(recist_crop[z_mid], scale=BOX_SCALE, shift=args.shift)
-
+                            for ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d in prepared_prompts:
                                 if torch_device.type == "cuda":
                                     torch.cuda.synchronize(torch_device)
                                 t_lesion = time.perf_counter()
 
+                                img_crop = img_tensor[z_lo : z_hi + 1]
                                 writer.mark_attempted(ulab)
                                 state = predictor.init_state(img_crop, video_height, video_width)
                                 _, _, logits = predictor.add_new_points_or_box(
@@ -271,7 +271,7 @@ def main() -> int:
                                     torch.cuda.synchronize(torch_device)
                                 profiler.record_lesion_time(ulab, time.perf_counter() - t_lesion)
 
-                    # 5. Final postprocess (counted in total_runtime_s) + save final NPZ only
+                    # 5. Final postprocess (counted in total_inference_time_s) + save final NPZ only
                     receipt = finalize_and_save_predictions(
                         writer,
                         out_npz,
@@ -332,13 +332,12 @@ def main() -> int:
         m = record["metrics"]
         print(
             f"[{idx + 1}/{len(cases)}] {model_name} | {case_id} | {record['status']} | "
-            f"total_runtime={m['total_runtime_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
+            f"total_inference={m['total_inference_time_s']:.3f}s | wall={m['end_to_end_wall_time_including_io_s']:.3f}s | "
             f"MaxRAM={m['MaxRAM_MB']:.1f}MB"
         )
 
-    csv_paths = write_model_csvs(records, out_dir)
-    print(f"Saved: {csv_paths['case_metrics']}")
-    print(f"Saved: {csv_paths['lesion_scores']}")
+    csv_path = write_model_csv(records, out_dir)
+    print(f"Saved: {csv_path}")
     return 1 if failures else 0
 
 

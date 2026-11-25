@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -164,6 +165,7 @@ def apply_moving_centroid_to_channels(
 def apply_moving_centroid_to_writer(
     writer: IndependentPredictionWriter,
     *,
+    profiler=None,
     scratch: str | Path | None = None,
     endpoints: dict[int, dict] | None = None,
     exempt_ids: set[int] | None = None,
@@ -197,6 +199,7 @@ def apply_moving_centroid_to_writer(
                     )
                 )
                 continue
+            t0 = time.perf_counter()
             post_writer.mark_attempted(lab)
             clipped, row = xy_centroid_clip_channel(
                 writer.channels[lab],
@@ -207,6 +210,8 @@ def apply_moving_centroid_to_writer(
                 exempt=int(lab) in exempt_ids,
             )
             post_writer.write_volume(lab, clipped)
+            if profiler is not None:
+                profiler.record_lesion_postprocess_time(lab, time.perf_counter() - t0)
             actions.append(row)
     except BaseException:
         post_writer.close()
@@ -228,7 +233,9 @@ def finalize_and_save_predictions(
     try:
         if postprocess == "moving_centroid":
             with profiler.phase("postprocessing_time"):
-                post_writer, _ = apply_moving_centroid_to_writer(writer, scratch=scratch)
+                post_writer, _ = apply_moving_centroid_to_writer(
+                    writer, profiler=profiler, scratch=scratch
+                )
             final_writer = post_writer
         elif postprocess == "none":
             final_writer = writer
