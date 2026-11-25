@@ -30,7 +30,7 @@ download_file() {
   mv "$dest.part" "$dest"
 }
 
-# 1. MedSAM2 FLARE25 RECIST baseline (pinned commit)
+# 1. MedSAM2 RECIST checkpoint (pinned commit)
 MEDSAM2_REV="e4a6f35edd7e091619cbc0750f462f1574e23955"
 download_file \
   "https://huggingface.co/wanglab/MedSAM2/resolve/${MEDSAM2_REV}/medsam2_FLARE25_RECIST_baseline.pt" \

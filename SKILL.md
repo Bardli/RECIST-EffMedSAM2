@@ -84,7 +84,7 @@ uv pip install --python .venv-sam/bin/python pytest   # or use .venv/bin/pytest 
 All offline tests must pass before proceeding (on CPU-only machines without CUDA PyTorch, `tests/test_cuda_cold_start.py` skips automatically).
 
 ### Step 4: Download & Verify Checkpoints
-Download the public `MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0` checkpoints into `./assets` and check SHA-256 checksums against `configs/weights.sha256`:
+Download the public `MedSAM2` RECIST checkpoint and `nnInteractive_v1.0` checkpoints into `./assets` and check SHA-256 checksums against `configs/weights.sha256`:
 ```bash
 bash scripts/download_weights.sh
 ```
@@ -101,9 +101,9 @@ Inspect at least one input `.npz` (without leaking patient IDs or CT arrays) to 
 - Pass `--require-raw-hu` on `recist-benchmark` only when strictly enforcing `nifti_stored_scaled_v1` HU decoding and rejecting pre-windowed inputs.
 
 ### Step 6: Run 1-Case Smoke Test & Audit Telemetry
-Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots` (use `recist-benchmark` for multi-model comparisons, or `bash scripts/infer_effmedsam2.sh` / `bash scripts/infer_medsam2.sh` / `bash scripts/infer_nninteractive.sh` for single-model runs):
+Run one case first with strict `--num-threads 1`, `--verify-sha256`, and `--plots` via `python -m recist_effmedsam2` (pass `--models ...` for a single method, or omit `--models` for the full 5-model suite):
 ```bash
-.venv-sam/bin/recist-benchmark \
+.venv-sam/bin/python -m recist_effmedsam2 \
   --input-dir "<INPUT_DIR>" \
   --output-dir runs/smoke_test \
   --device cpu \
@@ -128,9 +128,9 @@ Audit `runs/smoke_test/reports/case_metrics.csv`:
 Unless the user explicitly requested an unattended full run in Step 0, share the 1-case CSV summary and wait for confirmation before launching the full dataset.
 
 ### Step 7: Full Benchmark & Final Report
-Run without `--limit` to an explicit cohort `--output-dir` (via `recist-benchmark` for the full paper suite, or the per-model `.sh` script under `scripts/`):
+Run without `--limit` to an explicit cohort `--output-dir` (using `python -m recist_effmedsam2` for the full paper suite or with `--models ...` per method):
 ```bash
-.venv-sam/bin/recist-benchmark \
+.venv-sam/bin/python -m recist_effmedsam2 \
   --input-dir "<INPUT_DIR>" \
   --output-dir runs/benchmark_full \
   --device "<cpu|cuda>" \

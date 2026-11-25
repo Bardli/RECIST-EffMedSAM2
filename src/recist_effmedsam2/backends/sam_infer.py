@@ -57,8 +57,8 @@ HF_REPO_ID = "wanglab/MedSAM2"
 HF_WEIGHTS = {
     ("medsam2", "small"): "medsam2_FLARE25_RECIST_baseline.pt",
     ("medsam2", "tiny"): "medsam2_FLARE25_RECIST_baseline.pt",
-    ("eff", "small"): "eff_medsam2_small_FLARE25_RECIST_baseline.pt",
-    ("eff", "tiny"): "eff_medsam2_tiny_FLARE25_RECIST_baseline.pt",
+    ("eff", "small"): "checkpoint_40.pt",
+    ("eff", "tiny"): "checkpoint_40.pt",
 }
 DEFAULT_CFG_BY_TARGET = {
     ("medsam2", "small"): ("sam2", "configs/sam2.1_hiera_t512.yaml"),

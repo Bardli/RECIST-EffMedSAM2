@@ -66,7 +66,7 @@ uv pip install --python .venv-nn/bin/python -e . --no-deps
 
 ### 1. Download checkpoints
 
-Download the public `MedSAM2` FLARE25 RECIST baseline and `nnInteractive_v1.0` checkpoints into `./assets` and verify them against [`configs/weights.sha256`](configs/weights.sha256):
+Download the public `MedSAM2` RECIST checkpoint and `nnInteractive_v1.0` checkpoints into `./assets` and verify them against [`configs/weights.sha256`](configs/weights.sha256):
 
 ```bash
 bash scripts/download_weights.sh        # defaults to ./assets (or pass a custom path)
@@ -100,47 +100,50 @@ Each `.npz` file stores one 3D CT scan in `(Z, Y, X)` order:
 
 ### 3. Run inference
 
-Three standalone shell scripts mirror the three model families. Each script automatically picks `.venv-sam` or `.venv-nn`, reloads the model fresh per case, profiles CPU/RAM/GPU usage, and writes summary CSVs to `runs/`:
+Run any method directly with a single Python command (auto-detects `data/inputs/`, `data/window_twins/`, `assets/`, `.venv-sam/`, and `.venv-nn/`, reloads the model fresh per case, profiles CPU/RAM/GPU usage, and writes summary CSVs to `runs/benchmark/`):
 
 ```bash
-# 1) RECIST-EffMedSAM2 (Tiny by default; pass --limit 1 for a fast single-case check)
-bash scripts/infer_effmedsam2.sh --limit 1
+# 1) RECIST-EffMedSAM2 (pass --limit 1 for a fast single-case check)
+.venv-sam/bin/python -m recist_effmedsam2 --models efftiny_m8_ep40_box --verify-sha256 --plots
 
-# 2) MedSAM2 (FLARE25 RECIST baseline)
-bash scripts/infer_medsam2.sh
+# 2) MedSAM2
+.venv-sam/bin/python -m recist_effmedsam2 --models medsam2_box --verify-sha256 --plots
 
-# 3) nnInteractive (runs box, 3-point, and scribble configs; CPU by default)
-bash scripts/infer_nninteractive.sh
+# 3) nnInteractive (box, 3-point, and scribble; or pass a single model ID)
+.venv-nn/bin/python -m recist_effmedsam2 --models nninteractive_box_hu nninteractive_3pt_25_hu nninteractive_line_skel_in3_hu --verify-sha256 --plots
 ```
 
-Common one-flag switches work across all three scripts:
+Common flags work identically across all three methods:
 
 ```bash
-# Run on physical GPU 2, enable moving-centroid postprocessing, or override paths:
-bash scripts/infer_effmedsam2.sh --device cuda --gpu-index 2 --postprocess moving_centroid
-bash scripts/infer_nninteractive.sh --models nninteractive_box_hu --device cuda --gpu-index 0
+# Run on physical GPU 2 or enable moving-centroid postprocessing:
+.venv-sam/bin/python -m recist_effmedsam2 --models efftiny_m8_ep40_box --device cuda --gpu-index 2 --postprocess moving_centroid --verify-sha256 --plots
+.venv-nn/bin/python -m recist_effmedsam2 --models nninteractive_box_hu --device cuda --gpu-index 0 --verify-sha256 --plots
 ```
 
-To run the entire 5-model paper benchmark in one sweep and generate combined comparison tables:
+To run the entire 5-model benchmark in one sweep and generate combined comparison tables:
 
 ```bash
-.venv-sam/bin/recist-benchmark --verify-sha256 --plots
+.venv-sam/bin/python -m recist_effmedsam2 --verify-sha256 --plots
 ```
 
 <details>
-<summary>Custom paths & standalone Python CLIs</summary>
+<summary>Custom paths & standalone single-case backend CLIs</summary>
 
 ```bash
 # Explicit input/output/window-twin folders (adds --recursive for nested cancer subfolders)
-bash scripts/infer_effmedsam2.sh \
+.venv-sam/bin/python -m recist_effmedsam2 \
+  --models efftiny_m8_ep40_box \
   --input-dir /path/to/hu_inputs \
   --window-dir /path/to/window_twins \
   --output-dir runs/effmedsam2_cohort \
   --recursive \
-  --postprocess moving_centroid
+  --postprocess moving_centroid \
+  --verify-sha256 \
+  --plots
 
 # Run Small variant instead of Tiny
-MODEL=effsmall_m8_ep40_box bash scripts/infer_effmedsam2.sh
+.venv-sam/bin/python -m recist_effmedsam2 --models effsmall_m8_ep40_box --verify-sha256 --plots
 
 # Single-process Python backend CLIs (without the outer benchmark coordinator)
 .venv-sam/bin/recist-sam-infer -i /path/to/case.npz -o runs/sam_single \
@@ -160,20 +163,20 @@ For runtime/memory metric definitions, output CSV schemas, `recist-eval`, and of
 
 ## Supported Model Configurations
 
-| Model Family | Script | Prompt Derived from RECIST | Model ID (`configs/models.json`) | Scope |
-|---|---|---|---|---|
-| **RECIST-EffMedSAM2** (Tiny m8, ep40) | `scripts/infer_effmedsam2.sh` | Square box from SVD diameter | `efftiny_m8_ep40_box` | Paper (5 configs) |
-| **MedSAM2** | `scripts/infer_medsam2.sh` | Square box from SVD diameter | `medsam2_box` | Paper (5 configs) |
-| **nnInteractive-box** | `scripts/infer_nninteractive.sh` | 2D box on RECIST slice | `nninteractive_box_hu` | Paper (5 configs) |
-| **nnInteractive-point** | `scripts/infer_nninteractive.sh` | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
-| **nnInteractive-scribble** | `scripts/infer_nninteractive.sh` | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
-| EfficientMedSAM2-Small (Small m8, ep40) | `MODEL=effsmall_m8_ep40_box scripts/infer_effmedsam2.sh` | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
+| Model Family | Prompt Derived from RECIST | Model ID (`configs/models.json`) | Scope |
+|---|---|---|---|
+| **RECIST-EffMedSAM2** (Tiny m8, ep40) | Square box from SVD diameter | `efftiny_m8_ep40_box` | Paper (5 configs) |
+| **MedSAM2** | Square box from SVD diameter | `medsam2_box` | Paper (5 configs) |
+| **nnInteractive-box** | 2D box on RECIST slice | `nninteractive_box_hu` | Paper (5 configs) |
+| **nnInteractive-point** | 3 points (25% / 50% / 75% along line) | `nninteractive_3pt_25_hu` | Paper (5 configs) |
+| **nnInteractive-scribble** | Skeletonized line, endpoints inset 3 px | `nninteractive_line_skel_in3_hu` | Paper (5 configs) |
+| EfficientMedSAM2-Small (Small m8, ep40) | Square box from SVD diameter | `effsmall_m8_ep40_box` | Supplementary (`--model-scope all-six`) |
 
 ---
 
 ## License
 
-This codebase is released under the **Apache-2.0** license (see [`LICENSE`](LICENSE)). Third-party pre-trained checkpoints downloaded by `scripts/download_weights.sh` retain their upstream licenses — in particular, **`nnInteractive_v1.0` is licensed under `CC BY-NC-SA 4.0`** (non-commercial), and `MedSAM2` follows its upstream FLARE25 release terms.
+This codebase is released under the **Apache-2.0** license (see [`LICENSE`](LICENSE)). Third-party pre-trained checkpoints downloaded by `scripts/download_weights.sh` retain their upstream licenses — in particular, **`nnInteractive_v1.0` is licensed under `CC BY-NC-SA 4.0`** (non-commercial), and `MedSAM2` follows its upstream release terms.
 
 ## Citation
 
