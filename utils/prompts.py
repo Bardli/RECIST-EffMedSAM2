@@ -65,6 +65,19 @@ def recist_diameter(recist_per_lab: np.ndarray) -> float:
     return float(np.linalg.norm(p1 - p2))
 
 
+def recist_length_mm(
+    recist_per_lab: np.ndarray,
+    spacing_xyz: np.ndarray | list[float] | tuple[float, ...],
+) -> float:
+    """Physical length (mm) of the 2D axial RECIST segment using in-plane XY spacing."""
+    sp = np.asarray(spacing_xyz, dtype=np.float64).ravel()
+    if len(sp) < 2 or not np.all(np.isfinite(sp[:2])) or np.any(sp[:2] <= 0):
+        raise ValueError(f"Expected positive finite XY spacing, got {spacing_xyz!r}")
+    p1, p2 = recist_endpoints(recist_per_lab)
+    delta_xy = (p2.astype(np.float64) - p1.astype(np.float64)) * sp[:2]
+    return float(np.linalg.norm(delta_xy))
+
+
 def recist_bbox(
     recist_per_lab: np.ndarray,
     scale: float = 1.0,

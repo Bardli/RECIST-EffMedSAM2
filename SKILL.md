@@ -66,7 +66,7 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. No `
    ```
 
 ### Step 3: Offline Self-Test
-Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, standalone CLIs, single-CSV Option A reporting, and metric-grouped merging before running real checkpoints:
+Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, standalone CLIs, single-CSV Option A reporting, and vertical CSV concatenation before running real checkpoints:
 ```bash
 uv pip install --python .venv-sam/bin/python pytest
 .venv-sam/bin/pytest -v
@@ -95,9 +95,9 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```
 Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full diagnostic JSON receipt (`runs/smoke_eff/metrics/<case_id>.metrics.json`):
 - In `runs/smoke_eff/results.csv`:
-  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `total_end_to_end_time_including_io_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
+  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, and `ram_auc_mb_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
   - `total_end_to_end_time_including_io_s >= total_model_time_load_infer_post_s` on the 1st lesion row.
-  - `peak_ram_mb > 0`, and `predicted_volume_ml` / `dice_score` reflect the final saved output.
+  - `peak_ram_mb > 0`, `ram_auc_mb_s >= 0`, `recist_length_mm > 0`, and `predicted_volume_ml` / `dice_score` reflect the final saved output.
   - No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced.
 - In `runs/smoke_eff/metrics/<case_id>.metrics.json`:
   - `status == "ok"` and `metrics.ram_baseline_mb > 0`.
@@ -110,7 +110,7 @@ Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full 
 Unless the user explicitly requested an unattended full run in Step 0, share the 1-case `results.csv` summary and wait for confirmation before launching the full dataset.
 
 ### Step 7: Full Run, CSV Merge & Final Report
-Run each requested script without `--limit`, then merge the per-model `results.csv` files into one metric-grouped `merged_results.csv` with `merge_csvs.py`:
+Run each requested script without `--limit`, then concatenate the per-model `results.csv` files directly into `merged_results.csv` with `merge_csvs.py` (same columns, no pivoting):
 ```bash
 .venv-sam/bin/python infer_effmedsam2.py -i "<INPUT_DIR>" -o runs/EffMedSAM2 --device "<cpu|cuda>" --num-threads 1 --plots
 .venv-sam/bin/python infer_medsam2.py -i "<INPUT_DIR>" -o runs/MedSAM2 --device "<cpu|cuda>" --num-threads 1 --plots

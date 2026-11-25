@@ -1,4 +1,4 @@
-"""Single-file per-model CSV reporting (``results.csv``) and wide comparison merge (``merged_results.csv``)."""
+"""Single-file per-model CSV reporting (``results.csv``) and plain vertical merge (``merged_results.csv``)."""
 from __future__ import annotations
 
 import csv
@@ -12,6 +12,7 @@ RESULT_COLUMNS = [
     "dataset",
     "case_id",
     "lesion_id",
+    "recist_length_mm",
     "model_name",
     "device",
     "dice_score",
@@ -26,21 +27,7 @@ RESULT_COLUMNS = [
     "output_saving_time_s",
     "total_end_to_end_time_including_io_s",
     "peak_ram_mb",
-    "peak_gpu_memory_mb",
-]
-
-MERGED_SHARED_COLUMNS = [
-    "dataset",
-    "case_id",
-    "lesion_id",
-    "ground_truth_volume_ml",
-]
-
-MERGED_METRIC_COLUMNS = [
-    "dice_score",
-    "predicted_volume_ml",
-    "total_model_time_load_infer_post_s",
-    "peak_ram_mb",
+    "ram_auc_mb_s",
     "peak_gpu_memory_mb",
 ]
 
@@ -66,9 +53,10 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) ->
         writer.writerows(rows)
 
 
-def _read_csv(path: Path) -> list[dict[str, str]]:
+def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        return list(reader.fieldnames or []), list(reader)
 
 
 def _lookup_lesion_time(
@@ -91,7 +79,7 @@ def _lookup_lesion_time(
 
 
 def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Flatten case records into human-readable per-lesion CSV rows using Option A shared timings."""
+    """Flatten case records into human-readable per-lesion CSV rows using Option A shared metrics."""
     out_rows: list[dict[str, Any]] = []
 
     for record in records:
@@ -115,6 +103,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         case_wall_s = float(metrics.get("total_end_to_end_time_including_io_s") or 0.0)
 
         peak_ram_mb = _fmt_float(metrics.get("MaxRAM_MB"), 1)
+        case_auc_ram = metrics.get("AUC_RAM_Time_MB_s")
         peak_gpu_mb = _fmt_float(metrics.get("MaxGPU_Mem_MB"), 1)
 
         if not rows:
@@ -126,6 +115,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": "",
+                    "recist_length_mm": "",
                     "model_name": model_name,
                     "device": device,
                     "dice_score": "",
@@ -140,6 +130,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "output_saving_time_s": round(case_save_s, 4),
                     "total_end_to_end_time_including_io_s": round(case_wall_s, 4),
                     "peak_ram_mb": peak_ram_mb,
+                    "ram_auc_mb_s": _fmt_float(case_auc_ram, 1),
                     "peak_gpu_memory_mb": peak_gpu_mb,
                 }
             )
@@ -160,6 +151,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_pre_s = round(case_pre_s, 4) if is_first else 0.0
             row_save_s = round(case_save_s, 4) if is_first else 0.0
             row_wall_s = round(case_wall_s, 4) if is_first else 0.0
+            row_ram_auc = _fmt_float(case_auc_ram, 1) if is_first else (0.0 if case_auc_ram is not None else "")
 
             if single_lesion_case:
                 row_inf_s = round(case_inf_s, 4)
@@ -175,6 +167,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": gid,
+                    "recist_length_mm": _fmt_float(r.get("recist_length_mm"), 2),
                     "model_name": model_name,
                     "device": device,
                     "dice_score": round(float(r["dice"]), 4) if r.get("dice") is not None else "",
@@ -189,6 +182,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "output_saving_time_s": row_save_s,
                     "total_end_to_end_time_including_io_s": row_wall_s,
                     "peak_ram_mb": peak_ram_mb,
+                    "ram_auc_mb_s": row_ram_auc,
                     "peak_gpu_memory_mb": peak_gpu_mb,
                 }
             )
@@ -204,9 +198,11 @@ def write_model_csv(records: list[dict[str, Any]], output_dir: str | Path) -> Pa
     return csv_path
 
 
-def _load_result_csvs(inputs: list[Path]) -> list[dict[str, Any]]:
+def _load_result_csvs(inputs: list[Path]) -> tuple[list[str], list[dict[str, Any]]]:
     all_rows: list[dict[str, Any]] = []
+    extra_cols: list[str] = []
     seen_files: set[Path] = set()
+    known_cols = set(RESULT_COLUMNS)
 
     for raw_p in inputs:
         p = Path(raw_p).resolve()
@@ -221,52 +217,32 @@ def _load_result_csvs(inputs: list[Path]) -> list[dict[str, Any]]:
 
         if csv_path not in seen_files:
             seen_files.add(csv_path)
-            all_rows.extend(_read_csv(csv_path))
+            hdr, rows = _read_csv(csv_path)
+            for col in hdr:
+                if col not in known_cols and col not in extra_cols:
+                    extra_cols.append(col)
+            all_rows.extend(rows)
 
-    return all_rows
-
-
-def _assign_group_prefixes(groups: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
-    """Choose clean column prefixes for ``(model_name, device)`` groups."""
-    by_name: dict[str, int] = {}
-    for mname, _ in groups:
-        by_name[mname] = by_name.get(mname, 0) + 1
-
-    prefixes: dict[tuple[str, str], str] = {}
-    used: set[str] = set()
-    for key in groups:
-        mname, device = key
-        base = mname if by_name[mname] == 1 else (f"{mname}_{device}" if device else mname)
-        cand = base
-        idx = 2
-        while cand in used:
-            cand = f"{base}_{idx}"
-            idx += 1
-        used.add(cand)
-        prefixes[key] = cand
-    return prefixes
+    columns = list(RESULT_COLUMNS) + extra_cols
+    return columns, all_rows
 
 
-def _lesion_sort_key(k: tuple[str, str, str]) -> tuple[str, str, int, int, str]:
-    ds, cid, lid = k
-    if lid == "":
-        return (ds, cid, 1, 0, lid)
-    try:
-        return (ds, cid, 0, int(lid), lid)
-    except ValueError:
-        return (ds, cid, 0, 0, lid)
-
-
-def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]]) -> list[dict[str, Any]]:
+def _summarize_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Compute compact per-model console summary stats without writing extra CSV files."""
-    prefixes = _assign_group_prefixes(groups)
+    groups: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        grp = (str(r.get("model_name", "") or "model"), str(r.get("device", "")))
+        if grp not in seen:
+            seen.add(grp)
+            groups.append(grp)
+
     summaries: list[dict[str, Any]] = []
-    for grp in groups:
-        mname, device = grp
+    for mname, device in groups:
         grp_rows = [
             r
             for r in rows
-            if (str(r.get("model_name", "") or "model"), str(r.get("device", ""))) == grp
+            if (str(r.get("model_name", "") or "model"), str(r.get("device", ""))) == (mname, device)
         ]
         case_keys = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in grp_rows}
         dices = [float(r["dice_score"]) for r in grp_rows if r.get("dice_score", "") not in ("", None)]
@@ -275,11 +251,13 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
         ]
         timed_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in timed_rows}
         tot_times = [float(r["total_model_time_load_infer_post_s"]) for r in timed_rows]
+        auc_rows = [r for r in grp_rows if r.get("ram_auc_mb_s", "") not in ("", None)]
+        auc_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in auc_rows}
+        ram_aucs = [float(r["ram_auc_mb_s"]) for r in auc_rows]
         rams = [float(r["peak_ram_mb"]) for r in grp_rows if r.get("peak_ram_mb", "") not in ("", None)]
         gpus = [float(r["peak_gpu_memory_mb"]) for r in grp_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
         summaries.append(
             {
-                "column_prefix": prefixes[grp],
                 "model_name": mname,
                 "device": device,
                 "cases": len(case_keys),
@@ -289,6 +267,9 @@ def _summarize_groups(rows: list[dict[str, Any]], groups: list[tuple[str, str]])
                     round(sum(tot_times) / len(timed_cases), 4) if tot_times and timed_cases else None
                 ),
                 "max_peak_ram_mb": round(max(rams), 1) if rams else None,
+                "mean_case_ram_auc_mb_s": (
+                    round(sum(ram_aucs) / len(auc_cases), 1) if ram_aucs and auc_cases else None
+                ),
                 "max_peak_gpu_memory_mb": round(max(gpus), 1) if gpus else None,
             }
         )
@@ -299,49 +280,12 @@ def merge_model_csvs(
     input_paths: list[str | Path],
     output_path: str | Path,
 ) -> tuple[Path, list[dict[str, Any]]]:
-    """Merge per-model ``results.csv`` files into one metric-grouped wide comparison CSV."""
-    rows = _load_result_csvs([Path(p) for p in input_paths])
+    """Concatenate per-model ``results.csv`` files vertically into one ``merged_results.csv``."""
+    columns, rows = _load_result_csvs([Path(p) for p in input_paths])
     if not rows:
         raise FileNotFoundError("No rows found in input results.csv files")
 
-    groups: list[tuple[str, str]] = []
-    seen_groups: set[tuple[str, str]] = set()
-    for r in rows:
-        grp = (str(r.get("model_name", "") or "model"), str(r.get("device", "")))
-        if grp not in seen_groups:
-            seen_groups.add(grp)
-            groups.append(grp)
-    prefixes = _assign_group_prefixes(groups)
-
-    key_fields = ("dataset", "case_id", "lesion_id")
-    bucket_shared: dict[tuple[str, str, str], dict[str, Any]] = {}
-    bucket_models: dict[tuple[str, str, str], dict[tuple[str, str], dict[str, Any]]] = {}
-
-    for r in rows:
-        key = (str(r.get(key_fields[0], "")), str(r.get(key_fields[1], "")), str(r.get(key_fields[2], "")))
-        grp = (str(r.get("model_name", "") or "model"), str(r.get("device", "")))
-        sh = bucket_shared.setdefault(key, {})
-        for sf in MERGED_SHARED_COLUMNS:
-            if not sh.get(sf) and r.get(sf, "") not in ("", None):
-                sh[sf] = r[sf]
-        bucket_models.setdefault(key, {})[grp] = r
-
-    # Group columns by metric across models so models sit side-by-side for direct comparison.
-    columns = list(MERGED_SHARED_COLUMNS)
-    for metric in MERGED_METRIC_COLUMNS:
-        for grp in groups:
-            columns.append(f"{prefixes[grp]}_{metric}")
-
-    merged_rows: list[dict[str, Any]] = []
-    for key in sorted(bucket_shared, key=_lesion_sort_key):
-        row: dict[str, Any] = {sf: bucket_shared[key].get(sf, "") for sf in MERGED_SHARED_COLUMNS}
-        for metric in MERGED_METRIC_COLUMNS:
-            for grp in groups:
-                src = bucket_models.get(key, {}).get(grp, {})
-                row[f"{prefixes[grp]}_{metric}"] = src.get(metric, "")
-        merged_rows.append(row)
-
     out = Path(output_path).resolve()
     merged_csv = out if out.suffix.lower() == ".csv" else (out / "merged_results.csv")
-    _write_csv(merged_csv, columns, merged_rows)
-    return merged_csv, _summarize_groups(rows, groups)
+    _write_csv(merged_csv, columns, rows)
+    return merged_csv, _summarize_groups(rows)

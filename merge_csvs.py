@@ -1,4 +1,4 @@
-"""Merge per-model results.csv files into one metric-grouped wide comparison table."""
+"""Concatenate per-model results.csv files vertically into one combined CSV without pivoting."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=Path,
         default=None,
-        help="Per-model output directories (or direct results.csv paths) to merge",
+        help="Per-model output directories (or direct results.csv paths) to concatenate",
     )
     ap.add_argument(
         "--runs-dir",
@@ -75,11 +75,13 @@ def main() -> int:
             else "n/a"
         )
         ram_s = f"{s['max_peak_ram_mb']:.1f}MB" if s["max_peak_ram_mb"] is not None else "n/a"
+        auc_s = f"{s['mean_case_ram_auc_mb_s']:.1f}MB*s" if s["mean_case_ram_auc_mb_s"] is not None else "n/a"
         gpu_s = f"{s['max_peak_gpu_memory_mb']:.1f}MB" if s["max_peak_gpu_memory_mb"] is not None else "n/a"
         print(
-            f"  {s['column_prefix']} ({s['device'] or 'n/a'}): "
+            f"  {s['model_name']} ({s['device'] or 'n/a'}): "
             f"cases={s['cases']} | lesions={s['lesions']} | "
-            f"mean_dice={dice_s} | mean_model_time={time_s} | peak_ram={ram_s} | peak_gpu={gpu_s}"
+            f"mean_dice={dice_s} | mean_model_time={time_s} | "
+            f"peak_ram={ram_s} | mean_ram_auc={auc_s} | peak_gpu={gpu_s}"
         )
     return 0
 

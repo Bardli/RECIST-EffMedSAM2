@@ -12,6 +12,8 @@ from typing import Any
 
 import numpy as np
 
+from .prompts import find_recist_slices, recist_length_mm
+
 SCHEMA = "independent_instances_v2"
 
 
@@ -145,9 +147,17 @@ class IndependentPredictionWriter:
             for i in self.ids
         ]
 
+        recist_slices = find_recist_slices(self.recist)
         rows: list[dict[str, Any]] = []
         for k, lab in enumerate(self.ids):
             pred_voxels = pred_counts[lab]
+            rlen_mm: float | None = None
+            zs = recist_slices.get(lab, [])
+            if lab in self.prompt_ids and len(zs) == 1:
+                try:
+                    rlen_mm = recist_length_mm(self.recist[zs[0]] == lab, self.spacing)
+                except ValueError:
+                    rlen_mm = None
             if self.gt is not None:
                 ng = 0
                 ni = 0
@@ -167,6 +177,7 @@ class IndependentPredictionWriter:
                     channel_index=k,
                     gt_id=lab,
                     recist_id=lab if lab in self.prompt_ids else None,
+                    recist_length_mm=rlen_mm,
                     prediction_id=lab,
                     status=statuses[k],
                     gt_voxels=ng,

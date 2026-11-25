@@ -20,6 +20,7 @@ from utils.prompts import (
     points_for_mode,
     recist_bbox,
     recist_endpoints,
+    recist_length_mm,
     scribble_plane,
 )
 from utils.storage import IndependentPredictionWriter, load_independent_prediction
@@ -108,6 +109,10 @@ def test_recist_prompts_and_scribble():
     diameter = float(np.linalg.norm(p2 - p1))
     assert 28.5 <= diameter <= 31.5  # true 30px line after 2px cap removal
 
+    # Horizontal line of ~30 px scaled by anisotropic XY spacing [0.5, 1.0, 2.0] -> ~15 mm
+    len_mm = recist_length_mm(plane, [0.5, 1.0, 2.0])
+    assert 14.2 <= len_mm <= 15.8
+
     box = recist_bbox(plane)
     nn_box = get_diameter_bbox(plane)
     assert box[0] < box[2] and box[1] < box[3]
@@ -173,6 +178,9 @@ def test_independent_storage_overlap_empty_and_postprocess(tmp_path: Path):
 
     assert receipt["instance_ids"] == [2, 5, 9]
     assert receipt["statuses"] == ["predicted", "predicted_empty", "no_recist"]
+    assert receipt["rows"][0]["recist_length_mm"] is not None and receipt["rows"][0]["recist_length_mm"] > 0.0
+    assert receipt["rows"][1]["recist_length_mm"] is not None and receipt["rows"][1]["recist_length_mm"] > 0.0
+    assert receipt["rows"][2]["recist_length_mm"] is None
     loaded = load_independent_prediction(out_npz)
     assert loaded["segs"].shape == (3, *shape)
     assert loaded["instance_ids"] == [2, 5, 9]

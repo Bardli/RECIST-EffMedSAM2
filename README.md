@@ -110,7 +110,7 @@ Each model has one standalone Python script that reloads the model fresh per cas
 .venv-nn/bin/python infer_nninteractive.py -i data/inputs -o runs/nnInteractive_scribble --prompt-mode line --device cpu --plots
 ```
 
-Finally, merge the per-model `results.csv` files horizontally into **one compact wide comparison CSV (`merged_results.csv`)** grouped side-by-side by metric (`dice_score`, `predicted_volume_ml`, `total_model_time_load_infer_post_s`, `peak_ram_mb`, `peak_gpu_memory_mb`):
+Finally, concatenate the per-model `results.csv` files directly into **one combined `merged_results.csv`** (preserving the exact same columns without pivoting):
 
 ```bash
 .venv-sam/bin/python merge_csvs.py -i runs/EffMedSAM2 runs/MedSAM2 runs/nnInteractive_box -o runs/merged/merged_results.csv
@@ -147,7 +147,7 @@ For runtime/memory column definitions, merged CSV layout, and offline `pytest` v
 
 ## Supported Model Configurations
 
-| Model Name (CSV Prefix) | Script | Prompt Derived from RECIST | Postprocessing |
+| Model Name | Script | Prompt Derived from RECIST | Postprocessing |
 |---|---|---|---|
 | `EffMedSAM2` | [`infer_effmedsam2.py`](infer_effmedsam2.py) | Square box from SVD diameter (Z-slab `1.6x`) | `moving_centroid` (default) |
 | `MedSAM2` | [`infer_medsam2.py`](infer_medsam2.py) | Square box from SVD diameter (full Z-volume) | None |
