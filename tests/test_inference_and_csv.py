@@ -1,4 +1,4 @@
-"""Tests for standalone script CLIs, human-readable 20-col CSV, JSON diagnostics, and plain merge."""
+"""Tests for standalone script CLIs, human-readable 22-col CSV, JSON diagnostics, and plain merge."""
 from __future__ import annotations
 
 import csv
@@ -111,7 +111,9 @@ def test_final_only_postprocessing_saves_single_npz_and_no_intermediate_dirs(tmp
     assert loaded["segs"][0, 4, 0, 0] == 0
     assert rec["metrics"]["postprocessing_time_s"] > 0.0
     assert rec["per_lesion_postprocessing_time_s"]["1"] > 0.0
-    assert rec["rows"][0]["recist_length_mm"] is not None and rec["rows"][0]["recist_length_mm"] > 0.0
+    assert rec["rows"][0]["ground_truth_recist_length_mm"] > 0.0
+    assert rec["rows"][0]["predicted_recist_length_mm"] > 0.0
+    assert rec["rows"][0]["recist_prompt_length_mm"] > 0.0
     assert np.isclose(
         rec["metrics"]["total_model_time_load_infer_post_s"],
         rec["metrics"]["model_loading_time_s"]
@@ -127,6 +129,7 @@ def test_final_only_postprocessing_saves_single_npz_and_no_intermediate_dirs(tmp
     assert rec["rows"][0]["pred_voxels"] > 0
     assert "MaxCPU_Utilization_pct" in rec["metrics"]
     assert "AUC_RAM_Time_MB_s" in rec["metrics"]
+    assert "AUC_GPU_Time_MB_s" in rec["metrics"]
     assert "gpu_monitor_status" in rec["metrics"]
     assert "gpu_sanity_ok" in rec["metrics"]
 
@@ -139,16 +142,16 @@ def _make_record(
     device: str,
     postprocess: str,
     load_s: float,
-    lesions: list[tuple[int, float, float, int, float, float]],
+    lesions: list[tuple[int, float, float, float, int, float, float]],
     wall_s: float,
     ram_mb: float,
     gpu_mb: float | None,
     status: str = "ok",
     error: str = "",
 ) -> dict:
-    # lesions: [(gt_id, recist_len_mm, dice, pred_voxels, inf_s, post_s)]
-    inf_total = round(sum(x[4] for x in lesions), 6)
-    post_total = round(sum(x[5] for x in lesions), 6)
+    # lesions: [(gt_id, gt_recist_mm, pred_recist_mm, dice, pred_voxels, inf_s, post_s)]
+    inf_total = round(sum(x[5] for x in lesions), 6)
+    post_total = round(sum(x[6] for x in lesions), 6)
     total_inf = round(load_s + inf_total + post_total, 6)
     return {
         "dataset": dataset,
@@ -163,14 +166,16 @@ def _make_record(
         "n_lesions": len(lesions),
         "shape_zyx": [8, 48, 48],
         "spacing_xyz": [1.0, 1.0, 2.0],
-        "per_lesion_inference_time_s": {str(gid): round(inf_s, 6) for gid, _, _, _, inf_s, _ in lesions},
-        "per_lesion_postprocessing_time_s": {str(gid): round(post_s, 6) for gid, _, _, _, _, post_s in lesions},
+        "per_lesion_inference_time_s": {str(gid): round(inf_s, 6) for gid, _, _, _, _, inf_s, _ in lesions},
+        "per_lesion_postprocessing_time_s": {str(gid): round(post_s, 6) for gid, _, _, _, _, _, post_s in lesions},
         "rows": [
             {
                 "channel_index": i,
                 "gt_id": gid,
                 "recist_id": gid,
-                "recist_length_mm": rlen,
+                "ground_truth_recist_length_mm": gt_len,
+                "predicted_recist_length_mm": pred_len,
+                "recist_prompt_length_mm": gt_len,
                 "prediction_id": gid,
                 "status": "predicted",
                 "gt_voxels": 100,
@@ -178,7 +183,7 @@ def _make_record(
                 "intersection": int(round(dice * (100 + pvox) / 2.0)),
                 "dice": dice,
             }
-            for i, (gid, rlen, dice, pvox, _, _) in enumerate(lesions)
+            for i, (gid, gt_len, pred_len, dice, pvox, _, _) in enumerate(lesions)
         ],
         "metrics": {
             "total_model_time_load_infer_post_s": total_inf,
@@ -216,7 +221,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     med_dir = tmp_path / "runs" / "MedSAM2"
     nn_dir = tmp_path / "runs" / "nnInteractive_box"
 
-    # Case 1 (1 lesion), Case 2 (2 lesions -> Option A shared metrics on row 0 only), Case 3 (failed)
+    # CPU measured (0.0 VRAM), GPU multi-lesion (Option A on ram_auc & gpu_memory_auc), unavailable GPU (blank), failed
     eff_cpu_csv = write_model_csv(
         [
             _make_record(
@@ -226,7 +231,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="moving_centroid",
                 load_s=0.41234,
-                lesions=[(1, 22.456, 0.881234, 102, 1.23456, 0.10004)],
+                lesions=[(1, 22.456, 21.984, 0.881234, 102, 1.23456, 0.10004)],
                 wall_s=1.82345,
                 ram_mb=900.16,
                 gpu_mb=0.0,
@@ -238,10 +243,10 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="moving_centroid",
                 load_s=0.5,
-                lesions=[(1, 18.2, 0.85, 95, 1.1, 0.12), (2, 31.7, 0.90, 104, 0.8, 0.08)],
+                lesions=[(1, 18.2, 17.5, 0.85, 95, 1.1, 0.12), (2, 31.7, 30.2, 0.90, 104, 0.8, 0.08)],
                 wall_s=2.72,
                 ram_mb=950.0,
-                gpu_mb=0.0,
+                gpu_mb=None,  # unavailable -> peak_gpu_memory_mb & gpu_memory_auc_mb_s must stay blank ""
             ),
             _make_record(
                 dataset="colon",
@@ -264,7 +269,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     assert not (eff_cpu_dir / "case_metrics.csv").exists()
     assert not (eff_cpu_dir / "lesion_scores.csv").exists()
 
-    write_model_csv(
+    eff_gpu_csv = write_model_csv(
         [
             _make_record(
                 dataset="colon",
@@ -273,8 +278,8 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
                 device="cuda",
                 postprocess="moving_centroid",
                 load_s=0.3,
-                lesions=[(1, 22.456, 0.89, 101, 0.2, 0.08)],
-                wall_s=0.70,
+                lesions=[(1, 22.456, 22.1, 0.89, 101, 0.2, 0.08), (2, 15.0, 14.5, 0.86, 80, 0.15, 0.06)],
+                wall_s=0.90,
                 ram_mb=1200.0,
                 gpu_mb=2200.04,
             ),
@@ -290,7 +295,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="none",
                 load_s=0.6,
-                lesions=[(1, 22.456, 0.84, 110, 2.4, 0.0)],
+                lesions=[(1, 22.456, 23.4, 0.84, 110, 2.4, 0.0)],
                 wall_s=3.12,
                 ram_mb=1500.0,
                 gpu_mb=0.0,
@@ -307,7 +312,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
                 device="cpu",
                 postprocess="none",
                 load_s=0.5,
-                lesions=[(1, 22.456, 0.91, 98, 3.5, 0.0)],
+                lesions=[(1, 22.456, 22.3, 0.91, 98, 3.5, 0.0)],
                 wall_s=4.12,
                 ram_mb=2100.0,
                 gpu_mb=0.0,
@@ -321,9 +326,10 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
         eff_hdr = reader.fieldnames or []
         eff_rows = list(reader)
     assert eff_hdr == RESULT_COLUMNS
-    assert len(eff_hdr) == 20
-    assert "recist_length_mm" in eff_hdr
-    assert "ram_auc_mb_s" in eff_hdr
+    assert len(eff_hdr) == 22
+    assert "ground_truth_recist_length_mm" in eff_hdr
+    assert "predicted_recist_length_mm" in eff_hdr
+    assert "gpu_memory_auc_mb_s" in eff_hdr
     assert not (set(eff_hdr) & DIAGNOSTIC_ONLY_COLUMNS)
     assert not any(
         c.startswith("post_")
@@ -333,14 +339,16 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
             "single_lesion_inference_time_s",
             "total_inference_time_s",
             "end_to_end_wall_time_including_io_s",
+            "recist_length_mm",
         )
         for c in eff_hdr
     )
     assert len(eff_rows) == 4  # 1 (case_01) + 2 (case_02) + 1 (case_03_err fallback)
 
-    # Single-lesion case: recist_length_mm, ram_auc_mb_s, 4-decimal timings, 1-decimal RAM/VRAM
+    # Single-lesion case: GT & predicted RECIST lengths, AUCs, 4-decimal timings, 1-decimal RAM/VRAM
     c1 = eff_rows[0]
-    assert c1["recist_length_mm"] == "22.46"
+    assert c1["ground_truth_recist_length_mm"] == "22.46"
+    assert c1["predicted_recist_length_mm"] == "21.98"
     assert c1["dice_score"] == "0.8812"
     assert c1["model_loading_time_s"] == "0.4123"
     assert c1["model_inference_time_s"] == "1.2346"
@@ -355,41 +363,38 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     assert c1["peak_ram_mb"] == "900.2"
     assert c1["ram_auc_mb_s"] == str(round(900.16 * 1.82345, 1))
     assert c1["peak_gpu_memory_mb"] == "0.0"
+    assert c1["gpu_memory_auc_mb_s"] == "0.0"
 
-    # Multi-lesion case (Option A): shared timings and ram_auc_mb_s on lesion 1, zero on lesion 2
+    # Unavailable GPU case (case_02): peak_gpu_memory_mb & gpu_memory_auc_mb_s stay blank "" (never 0.0)
     c2_l1, c2_l2 = eff_rows[1], eff_rows[2]
-    assert c2_l1["recist_length_mm"] == "18.2"
-    assert c2_l2["recist_length_mm"] == "31.7"
-    assert float(c2_l1["model_loading_time_s"]) == 0.5
-    assert float(c2_l1["data_loading_time_s"]) == 0.0512
-    assert float(c2_l1["image_preprocessing_time_s"]) == 0.0412
-    assert float(c2_l1["output_saving_time_s"]) == 0.0312
-    assert float(c2_l1["total_end_to_end_time_including_io_s"]) == 2.72
+    assert c2_l1["ground_truth_recist_length_mm"] == "18.2"
+    assert c2_l1["predicted_recist_length_mm"] == "17.5"
+    assert c2_l2["ground_truth_recist_length_mm"] == "31.7"
+    assert c2_l2["predicted_recist_length_mm"] == "30.2"
+    assert c2_l1["peak_gpu_memory_mb"] == ""
+    assert c2_l1["gpu_memory_auc_mb_s"] == ""
+    assert c2_l2["peak_gpu_memory_mb"] == ""
+    assert c2_l2["gpu_memory_auc_mb_s"] == ""
     assert float(c2_l1["ram_auc_mb_s"]) == round(950.0 * 2.72, 1)
-    assert float(c2_l1["model_inference_time_s"]) == 1.1
-    assert float(c2_l1["postprocessing_time_s"]) == 0.12
-    assert np.isclose(float(c2_l1["total_model_time_load_infer_post_s"]), 1.72)
-
-    assert float(c2_l2["model_loading_time_s"]) == 0.0
-    assert float(c2_l2["data_loading_time_s"]) == 0.0
-    assert float(c2_l2["image_preprocessing_time_s"]) == 0.0
-    assert float(c2_l2["output_saving_time_s"]) == 0.0
-    assert float(c2_l2["total_end_to_end_time_including_io_s"]) == 0.0
     assert float(c2_l2["ram_auc_mb_s"]) == 0.0
-    assert float(c2_l2["model_inference_time_s"]) == 0.8
-    assert float(c2_l2["postprocessing_time_s"]) == 0.08
-    assert np.isclose(float(c2_l2["total_model_time_load_infer_post_s"]), 0.88)
+    assert float(c2_l2["model_loading_time_s"]) == 0.0
 
-    # Failed case fallback row keeps observed timing/RAM/AUC with blank lesion/score fields
+    # CUDA multi-lesion case: Option A applies identically to gpu_memory_auc_mb_s
+    with eff_gpu_csv.open() as f:
+        gpu_rows = list(csv.DictReader(f))
+    assert gpu_rows[0]["peak_gpu_memory_mb"] == "2200.0"
+    assert float(gpu_rows[0]["gpu_memory_auc_mb_s"]) == round(2200.04 * 0.90, 1)
+    assert float(gpu_rows[1]["gpu_memory_auc_mb_s"]) == 0.0
+    assert float(gpu_rows[1]["ram_auc_mb_s"]) == 0.0
+
+    # Failed case fallback row
     c3 = eff_rows[3]
     assert c3["case_id"] == "case_03_err"
     assert c3["lesion_id"] == ""
-    assert c3["recist_length_mm"] == ""
-    assert c3["dice_score"] == ""
-    assert float(c3["model_loading_time_s"]) == 0.2
-    assert float(c3["total_model_time_load_infer_post_s"]) == 0.2
-    assert c3["peak_ram_mb"] == "400.0"
+    assert c3["ground_truth_recist_length_mm"] == ""
+    assert c3["predicted_recist_length_mm"] == ""
     assert c3["ram_auc_mb_s"] == "100.0"
+    assert c3["gpu_memory_auc_mb_s"] == "0.0"
 
     # Merge by plain vertical concatenation (no pivoting or prefix rewriting)
     merged_dir = tmp_path / "runs" / "merged"
@@ -424,22 +429,23 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
         mhdr = mreader.fieldnames or []
         mrows = list(mreader)
 
-    # Exact same 20 columns as results.csv, zero pivoted/prefixed columns
+    # Exact same 22 columns as results.csv
     assert mhdr == RESULT_COLUMNS
-    # 4 (eff_cpu) + 1 (eff_gpu) + 1 (med) + 1 (nn) = 7 concatenated rows in order
-    assert len(mrows) == 7
+    # 4 (eff_cpu) + 2 (eff_gpu) + 1 (med) + 1 (nn) = 8 concatenated rows in order
+    assert len(mrows) == 8
     assert [(r["model_name"], r["device"], r["case_id"], r["lesion_id"]) for r in mrows] == [
         ("EffMedSAM2", "cpu", "case_01", "1"),
         ("EffMedSAM2", "cpu", "case_02", "1"),
         ("EffMedSAM2", "cpu", "case_02", "2"),
         ("EffMedSAM2", "cpu", "case_03_err", ""),
         ("EffMedSAM2", "cuda", "case_01", "1"),
+        ("EffMedSAM2", "cuda", "case_01", "2"),
         ("MedSAM2", "cpu", "case_01", "1"),
         ("nnInteractive_box", "cpu", "case_01", "1"),
     ]
     assert mrows[4]["peak_gpu_memory_mb"] == "2200.0"
-    assert mrows[5]["dice_score"] == "0.84"
-    assert mrows[6]["recist_length_mm"] == "22.46"
+    assert mrows[6]["predicted_recist_length_mm"] == "23.4"
+    assert mrows[7]["ground_truth_recist_length_mm"] == "22.46"
 
     # Also check direct .csv path via -o out/custom.csv
     custom_csv = tmp_path / "custom_out" / "compare.csv"

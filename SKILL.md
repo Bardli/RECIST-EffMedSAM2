@@ -95,15 +95,15 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```
 Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full diagnostic JSON receipt (`runs/smoke_eff/metrics/<case_id>.metrics.json`):
 - In `runs/smoke_eff/results.csv`:
-  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, and `ram_auc_mb_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT).
+  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT, or blank if GPU memory is unmeasured).
   - `total_end_to_end_time_including_io_s >= total_model_time_load_infer_post_s` on the 1st lesion row.
-  - `peak_ram_mb > 0`, `ram_auc_mb_s >= 0`, `recist_length_mm > 0`, and `predicted_volume_ml` / `dice_score` reflect the final saved output.
+  - `peak_ram_mb > 0`, `ram_auc_mb_s >= 0`, `ground_truth_recist_length_mm > 0`, and `predicted_recist_length_mm` / `predicted_volume_ml` / `dice_score` reflect the final saved output.
   - No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced.
 - In `runs/smoke_eff/metrics/<case_id>.metrics.json`:
   - `status == "ok"` and `metrics.ram_baseline_mb > 0`.
   - **On `--device cpu`:**
-    - If `metrics.gpu_monitor_status == "measured"`: confirm `metrics.gpu_sanity_ok is True` and `metrics.MaxGPU_Mem_MB == 0.0` (and `peak_gpu_memory_mb == 0.0` in `results.csv`).
-    - If running on a CPU-only machine without NVIDIA tooling (`metrics.gpu_monitor_status == "unavailable"`): confirm `metrics.gpu_sanity_ok is None` and `peak_gpu_memory_mb` is blank in `results.csv` (not `0.0`).
+    - If `metrics.gpu_monitor_status == "measured"`: confirm `metrics.gpu_sanity_ok is True` and `metrics.MaxGPU_Mem_MB == 0.0` (and `peak_gpu_memory_mb == 0.0`, `gpu_memory_auc_mb_s == 0.0` in `results.csv`).
+    - If running on a CPU-only machine without NVIDIA tooling (`metrics.gpu_monitor_status == "unavailable"`): confirm `metrics.gpu_sanity_ok is None` and `peak_gpu_memory_mb` / `gpu_memory_auc_mb_s` are blank in `results.csv` (not `0.0`).
     - Never accept `gpu_monitor_status` in `{"query_failed", "partial"}` as zero VRAM.
   - **On `--device cuda --gpu-index N`:** confirm `metrics.gpu_monitor_status == "measured"` and nonzero GPU usage on physical card `N`.
 

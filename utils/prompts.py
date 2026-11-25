@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import binary_dilation
+from scipy.spatial import ConvexHull, QhullError
+from scipy.spatial.distance import pdist
 
 SEED = 2024
 SUBTRACT_THICKNESS = 2.0
@@ -76,6 +78,49 @@ def recist_length_mm(
     p1, p2 = recist_endpoints(recist_per_lab)
     delta_xy = (p2.astype(np.float64) - p1.astype(np.float64)) * sp[:2]
     return float(np.linalg.norm(delta_xy))
+
+
+def axial_diameter_mm(mask_2d: np.ndarray, sx: float, sy: float) -> float:
+    """Exact maximal 2D Euclidean Feret diameter (mm) among foreground pixels."""
+    ys, xs = np.nonzero(np.ascontiguousarray(mask_2d, dtype=bool))
+    if len(xs) < 2:
+        return 0.0
+    row_starts = np.flatnonzero(np.r_[True, ys[1:] != ys[:-1]])
+    row_ends = np.r_[row_starts[1:] - 1, len(ys) - 1]
+    bnd_idx = np.unique(np.concatenate([row_starts, row_ends]))
+    points = np.column_stack((xs[bnd_idx] * float(sx), ys[bnd_idx] * float(sy))).astype(np.float64)
+    if len(points) <= 3:
+        return float(pdist(points).max())
+    try:
+        hull = points[ConvexHull(points).vertices]
+        return float(pdist(hull).max())
+    except QhullError:
+        centered = points - points[0]
+        direction = centered[np.argmax(np.sum(centered**2, axis=1))]
+        norm = float(np.linalg.norm(direction))
+        if norm == 0.0:
+            return 0.0
+        projection = centered @ (direction / norm)
+        return float(projection.max() - projection.min())
+
+
+def max_axial_diameter_mm(
+    mask_3d: np.ndarray,
+    spacing_xyz: np.ndarray | list[float] | tuple[float, ...],
+) -> float:
+    """Maximum 2D axial Feret diameter (mm) across all slices of a 3D binary mask."""
+    sp = np.asarray(spacing_xyz, dtype=np.float64).ravel()
+    if len(sp) < 2 or not np.all(np.isfinite(sp[:2])) or np.any(sp[:2] <= 0):
+        raise ValueError(f"Expected positive finite XY spacing, got {spacing_xyz!r}")
+    sx, sy = float(sp[0]), float(sp[1])
+    best = 0.0
+    for z in range(mask_3d.shape[0]):
+        sl = mask_3d[z]
+        if np.any(sl):
+            d = axial_diameter_mm(sl, sx, sy)
+            if d > best:
+                best = d
+    return best
 
 
 def recist_bbox(

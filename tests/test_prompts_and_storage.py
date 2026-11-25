@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 import pytest
 
+from scipy.spatial.distance import pdist
+
 from utils.ct_inputs import (
     abdomen_image,
     nninteractive_image,
@@ -15,8 +17,10 @@ from utils.ct_inputs import (
 )
 from utils.postprocess import apply_moving_centroid_to_channels
 from utils.prompts import (
+    axial_diameter_mm,
     find_recist_slices,
     get_diameter_bbox,
+    max_axial_diameter_mm,
     points_for_mode,
     recist_bbox,
     recist_endpoints,
@@ -130,6 +134,48 @@ def test_recist_prompts_and_scribble():
     assert 0 < int(scrib.sum()) < int((plane > 0).sum())
 
 
+def test_axial_feret_diameter_equivalence_and_edge_cases():
+    sx, sy = 0.7, 1.3
+
+    def brute_force_diameter(mask: np.ndarray) -> float:
+        ys, xs = np.nonzero(mask)
+        if len(xs) < 2:
+            return 0.0
+        pts = np.column_stack((xs * sx, ys * sy)).astype(np.float64)
+        return float(pdist(pts).max())
+
+    # Empty & single pixel
+    assert axial_diameter_mm(np.zeros((16, 16), dtype=bool), sx, sy) == 0.0
+    single = np.zeros((16, 16), dtype=bool)
+    single[4, 7] = True
+    assert axial_diameter_mm(single, sx, sy) == 0.0
+
+    # Collinear 1-pixel horizontal, vertical, and diagonal (>3 points -> exercises QhullError fallback)
+    horiz = np.zeros((16, 16), dtype=bool)
+    horiz[5, 2:9] = True
+    assert np.isclose(axial_diameter_mm(horiz, sx, sy), 6 * sx)
+
+    vert = np.zeros((16, 16), dtype=bool)
+    vert[1:8, 6] = True
+    assert np.isclose(axial_diameter_mm(vert, sx, sy), 6 * sy)
+
+    diag = np.zeros((16, 16), dtype=bool)
+    for k in range(6):
+        diag[2 + k, 3 + 2 * k] = True
+    assert np.isclose(axial_diameter_mm(diag, sx, sy), brute_force_diameter(diag))
+
+    # Arbitrary ellipse + disjoint island on anisotropic XY grid
+    yy, xx = np.ogrid[:48, :48]
+    blob = ((yy - 18) ** 2 / 6.0**2 + (xx - 20) ** 2 / 9.0**2) <= 1.0
+    blob[35:39, 36:40] = True
+    assert np.isclose(axial_diameter_mm(blob, sx, sy), brute_force_diameter(blob))
+
+    vol = np.zeros((5, 48, 48), dtype=bool)
+    vol[1, :16, :16] = horiz
+    vol[3] = blob
+    assert np.isclose(max_axial_diameter_mm(vol, [sx, sy, 2.5]), brute_force_diameter(blob))
+
+
 def test_find_recist_slices_multilabel():
     recist_3d = np.zeros((10, 32, 32), dtype=np.uint16)
     cv2.line(recist_3d[7], (4, 8), (18, 8), 5, thickness=2)
@@ -178,9 +224,25 @@ def test_independent_storage_overlap_empty_and_postprocess(tmp_path: Path):
 
     assert receipt["instance_ids"] == [2, 5, 9]
     assert receipt["statuses"] == ["predicted", "predicted_empty", "no_recist"]
-    assert receipt["rows"][0]["recist_length_mm"] is not None and receipt["rows"][0]["recist_length_mm"] > 0.0
-    assert receipt["rows"][1]["recist_length_mm"] is not None and receipt["rows"][1]["recist_length_mm"] > 0.0
-    assert receipt["rows"][2]["recist_length_mm"] is None
+    # Predicted lesion 2 has non-zero GT and predicted axial Feret diameter; empty 5 & no_recist 9 have 0.0 predicted
+    assert receipt["rows"][0]["ground_truth_recist_length_mm"] == pytest.approx(float(np.hypot(7.0, 7.0)))
+    assert receipt["rows"][0]["predicted_recist_length_mm"] > receipt["rows"][0]["ground_truth_recist_length_mm"]
+    assert receipt["rows"][1]["ground_truth_recist_length_mm"] == pytest.approx(float(np.hypot(5.0, 5.0)))
+    assert receipt["rows"][1]["predicted_recist_length_mm"] == 0.0
+    assert receipt["rows"][2]["ground_truth_recist_length_mm"] == pytest.approx(float(np.hypot(3.0, 3.0)))
+    assert receipt["rows"][2]["predicted_recist_length_mm"] == 0.0
+    assert receipt["rows"][0]["recist_prompt_length_mm"] is not None
+    assert receipt["rows"][2]["recist_prompt_length_mm"] is None
+
+    # When GT is omitted (gt=None), ground_truth_recist_length_mm is None and predicted_recist_length_mm is still computed
+    out_nogt = tmp_path / "pred_nogt.npz"
+    with IndependentPredictionWriter(shape=shape, recist=recist, spacing=spacing, gt=None, scratch=tmp_path) as w2:
+        w2.mark_attempted(2)
+        w2.write_volume(2, pred_2)
+        w2.mark_attempted(5)
+        rec_nogt = w2.save(out_nogt)
+    assert rec_nogt["rows"][0]["ground_truth_recist_length_mm"] is None
+    assert rec_nogt["rows"][0]["predicted_recist_length_mm"] > 0.0
     loaded = load_independent_prediction(out_npz)
     assert loaded["segs"].shape == (3, *shape)
     assert loaded["instance_ids"] == [2, 5, 9]

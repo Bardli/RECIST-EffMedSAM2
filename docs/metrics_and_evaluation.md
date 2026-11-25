@@ -10,9 +10,11 @@ Every case run wraps all phases inside `CaseProfiler` (`utils/monitor.py`), alig
 
 When postprocessing (such as `moving_centroid` in `infer_effmedsam2.py`) is enabled, postprocessing executes before final NPZ saving and only the final prediction NPZ and final metrics are saved (no intermediate raw-vs-postprocessed NPZ files or `post_*` CSV columns). RECIST slice discovery and prompt geometry extraction run inside `image_preprocessing_time_s`, so `model_inference_time_s` captures pure model inference cleanly.
 
-### RECIST Prompt Geometry & Runtime Breakdown (seconds via `time.perf_counter()`, CUDA-synchronized on GPU)
+### RECIST Diameter & Runtime Breakdown
 
-- **`recist_length_mm`**: Physical axial diameter of the lesion's 2D RECIST prompt in millimetres, computed from SVD endpoints on the RECIST slice via `norm((p2 - p1) * spacing_xy)`.
+- **`ground_truth_recist_length_mm` & `predicted_recist_length_mm`**: Exact maximal 2D axial Euclidean Feret diameter (in mm, using in-plane XY spacing `(sx, sy)`) across all slices of the lesion's 3D ground-truth / final predicted mask (`0.0` for empty predictions; blank if `gt` was omitted). The 2D prompt line length (`recist_prompt_length_mm`) is also saved per lesion in `metrics/<case_id>.metrics.json`.
+
+Runtime breakdown columns (seconds via `time.perf_counter()`, CUDA-synchronized on GPU):
 
 | CSV Column | Included in `total_model_time_load_infer_post_s`? | Definition |
 |---|---|---|
@@ -27,42 +29,43 @@ When postprocessing (such as `moving_centroid` in `infer_effmedsam2.py`) is enab
 
 #### Multi-RECIST Case-Level Rule (No Double-Counting)
 
-Each row in `results.csv` represents **one RECIST lesion**:
-- For a **single-lesion CT**, that single row records all phase timings and `ram_auc_mb_s` directly.
-- For a **multi-lesion CT** (same model loaded once per CT volume), case-level shared metrics (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, and `ram_auc_mb_s`) are recorded on the **first lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT, while each lesion row records its own `model_inference_time_s`, `postprocessing_time_s`, and `recist_length_mm`. Summing across rows gives the true cohort total without double-counting.
+Each row in `results.csv` represents **one lesion**:
+- For a **single-lesion CT**, that single row records all phase timings, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s` directly.
+- For a **multi-lesion CT** (same model loaded once per CT volume), case-level shared metrics (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s`) are recorded on the **first lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT (or blank `""` if GPU memory was unmeasured), while each lesion row records its own `model_inference_time_s`, `postprocessing_time_s`, `ground_truth_recist_length_mm`, and `predicted_recist_length_mm`. Summing across rows gives the true cohort total without double-counting.
 
 ### RAM & GPU Memory Metrics (Human-Readable CSVs vs. Full JSON Receipts)
 
-- **`results.csv` & `merged_results.csv` (human-facing):** Keep only essential identification, `recist_length_mm` (2 decimals in mm), segmentation Dice/volumes (4 decimals), clean phase timings (4 decimals), and RAM/VRAM resource scores (1 decimal):
+- **`results.csv` & `merged_results.csv` (human-facing):** Keep only essential identification, `ground_truth_recist_length_mm` / `predicted_recist_length_mm` (2 decimals in mm), segmentation Dice/volumes (4 decimals), clean phase timings (4 decimals), and RAM/VRAM peaks + AUC scores (1 decimal):
   - `peak_ram_mb` (`MaxRAM_MB` in JSON, MiB): peak process-tree RSS (`sampled_peak_rss_mb`, plus `ru_maxrss` on the first case in a run, bounded below by `ram_baseline_mb`)
   - `ram_auc_mb_s` (`AUC_RAM_Time_MB_s` in JSON, MiB·s): trapezoidal area under the process-tree RSS vs. time curve, matching FLARE-Efficiency's `AUC_RAM_Time` metric
   - `peak_gpu_memory_mb` (`MaxGPU_Mem_MB` in JSON, MiB): `max(PID-scoped NVML peak, PyTorch peak reserved)`, or blank if GPU memory could not be queried
-- **`metrics/<case_id>.metrics.json` (machine/diagnostic receipts):** Preserve full-precision unrounded floats alongside all diagnostic, status, and profiling fields removed from CSV (`status`, `error`, `postprocess`, `recist_id`, per-lesion `prediction_status` and raw voxel counts, `MaxCPU_Utilization_pct`, `ram_baseline_mb`, `ram_inference_peak_mb`, `ram_delta_mb`, `AUC_CPU_Time_pct_s`, `gpu_nvml_peak_mb`, `AUC_GPU_Time_MB_s`, `RankGPU_Mem_MB`, `gpu_torch_peak_allocated_mb`, `gpu_torch_peak_reserved_mb`, `gpu_monitor_status`, `gpu_sanity_ok`, and host hardware metadata).
+  - `gpu_memory_auc_mb_s` (`AUC_GPU_Time_MB_s` in JSON, MiB·s): trapezoidal area under the PID-scoped GPU memory vs. time curve, matching FLARE-Efficiency's `AUC_GPU_Time` metric (`0.0` on verified `--device cpu`; blank if GPU memory could not be queried)
+- **`metrics/<case_id>.metrics.json` (machine/diagnostic receipts):** Preserve full-precision unrounded floats alongside all diagnostic, status, and profiling fields removed from CSV (`status`, `error`, `postprocess`, `recist_id`, `recist_prompt_length_mm`, per-lesion `prediction_status` and raw voxel counts, `MaxCPU_Utilization_pct`, `ram_baseline_mb`, `ram_inference_peak_mb`, `ram_delta_mb`, `AUC_CPU_Time_pct_s`, `gpu_nvml_peak_mb`, `RankGPU_Mem_MB`, `gpu_torch_peak_allocated_mb`, `gpu_torch_peak_reserved_mb`, `gpu_monitor_status`, `gpu_sanity_ok`, and host hardware metadata).
 
 ---
 
 ## Single Per-Model CSV (`results.csv`) & Concatenated Merged CSV (`merged_results.csv`)
 
-Each standalone inference script produces **one concise CSV (`<output-dir>/results.csv`, 20 columns)** alongside predictions, JSON telemetry receipts, and optional plots:
+Each standalone inference script produces **one concise CSV (`<output-dir>/results.csv`, 22 columns)** alongside predictions, JSON telemetry receipts, and optional plots:
 
 ```text
 <output-dir>/
 ├── predictions/<case_id>.npz          # final independent_instances_v2 predictions (no intermediate raw+post duplicates)
 ├── metrics/<case_id>.metrics.json     # full-precision diagnostic telemetry, status/errors, voxel counts, host info
 ├── plots/                             # optional CPU/RAM/GPU-vs-time PNGs (--plots)
-└── results.csv                        # 20 human-readable columns, 1 row per RECIST lesion
+└── results.csv                        # 22 human-readable columns, 1 row per lesion
 ```
 
-`results.csv` columns (20):
-`dataset`, `case_id`, `lesion_id`, `recist_length_mm`, `model_name`, `device`, `dice_score`, `ground_truth_volume_ml`, `predicted_volume_ml`, `total_model_time_load_infer_post_s`, `model_loading_time_s`, `model_inference_time_s`, `postprocessing_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `peak_ram_mb`, `ram_auc_mb_s`, `peak_gpu_memory_mb`.
+`results.csv` columns (22):
+`dataset`, `case_id`, `lesion_id`, `model_name`, `device`, `dice_score`, `ground_truth_recist_length_mm`, `predicted_recist_length_mm`, `ground_truth_volume_ml`, `predicted_volume_ml`, `total_model_time_load_infer_post_s`, `model_loading_time_s`, `model_inference_time_s`, `postprocessing_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `peak_ram_mb`, `ram_auc_mb_s`, `peak_gpu_memory_mb`, `gpu_memory_auc_mb_s`.
 
-Running `merge_csvs.py` performs a **plain vertical concatenation** of the per-model `results.csv` files into **one combined `merged_results.csv`** with the exact same 20 columns (no pivoting or column prefixes), while printing a compact per-model summary to stdout.
+Running `merge_csvs.py` performs a **plain vertical concatenation** of the per-model `results.csv` files into **one combined `merged_results.csv`** with the exact same 22 columns (no pivoting or column prefixes), while printing a compact per-model summary to stdout.
 
 ---
 
 ## Running Tests
 
-Offline unit and end-to-end synthetic tests validate phase timing math (`total_model_time_load_infer_post_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), `recist_length_mm`, FLARE-Efficiency `ram_auc_mb_s` and multi-RECIST zeroing, human-readable 20-column CSV formatting alongside full JSON receipts, final-only postprocessing, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and vertical CSV concatenation:
+Offline unit and end-to-end synthetic tests validate phase timing math (`total_model_time_load_infer_post_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), GT/predicted RECIST Feret diameter, FLARE-Efficiency `ram_auc_mb_s` and `gpu_memory_auc_mb_s` with multi-RECIST zeroing, human-readable 22-column CSV formatting alongside full JSON receipts, final-only postprocessing, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and vertical CSV concatenation:
 
 ```bash
 uv pip install --python .venv-sam/bin/python pytest

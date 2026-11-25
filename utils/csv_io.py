@@ -12,10 +12,11 @@ RESULT_COLUMNS = [
     "dataset",
     "case_id",
     "lesion_id",
-    "recist_length_mm",
     "model_name",
     "device",
     "dice_score",
+    "ground_truth_recist_length_mm",
+    "predicted_recist_length_mm",
     "ground_truth_volume_ml",
     "predicted_volume_ml",
     "total_model_time_load_infer_post_s",
@@ -29,6 +30,7 @@ RESULT_COLUMNS = [
     "peak_ram_mb",
     "ram_auc_mb_s",
     "peak_gpu_memory_mb",
+    "gpu_memory_auc_mb_s",
 ]
 
 
@@ -105,6 +107,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         peak_ram_mb = _fmt_float(metrics.get("MaxRAM_MB"), 1)
         case_auc_ram = metrics.get("AUC_RAM_Time_MB_s")
         peak_gpu_mb = _fmt_float(metrics.get("MaxGPU_Mem_MB"), 1)
+        case_auc_gpu = metrics.get("AUC_GPU_Time_MB_s")
 
         if not rows:
             c_load = round(case_load_s, 4)
@@ -115,10 +118,11 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": "",
-                    "recist_length_mm": "",
                     "model_name": model_name,
                     "device": device,
                     "dice_score": "",
+                    "ground_truth_recist_length_mm": "",
+                    "predicted_recist_length_mm": "",
                     "ground_truth_volume_ml": "",
                     "predicted_volume_ml": "",
                     "total_model_time_load_infer_post_s": round(c_load + c_inf + c_post, 4),
@@ -132,6 +136,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "peak_ram_mb": peak_ram_mb,
                     "ram_auc_mb_s": _fmt_float(case_auc_ram, 1),
                     "peak_gpu_memory_mb": peak_gpu_mb,
+                    "gpu_memory_auc_mb_s": _fmt_float(case_auc_gpu, 1),
                 }
             )
             continue
@@ -152,6 +157,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_save_s = round(case_save_s, 4) if is_first else 0.0
             row_wall_s = round(case_wall_s, 4) if is_first else 0.0
             row_ram_auc = _fmt_float(case_auc_ram, 1) if is_first else (0.0 if case_auc_ram is not None else "")
+            row_gpu_auc = _fmt_float(case_auc_gpu, 1) if is_first else (0.0 if case_auc_gpu is not None else "")
 
             if single_lesion_case:
                 row_inf_s = round(case_inf_s, 4)
@@ -167,10 +173,11 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dataset": dataset,
                     "case_id": case_id,
                     "lesion_id": gid,
-                    "recist_length_mm": _fmt_float(r.get("recist_length_mm"), 2),
                     "model_name": model_name,
                     "device": device,
                     "dice_score": round(float(r["dice"]), 4) if r.get("dice") is not None else "",
+                    "ground_truth_recist_length_mm": _fmt_float(r.get("ground_truth_recist_length_mm"), 2),
+                    "predicted_recist_length_mm": _fmt_float(r.get("predicted_recist_length_mm"), 2),
                     "ground_truth_volume_ml": gt_vol_ml,
                     "predicted_volume_ml": pred_vol_ml,
                     "total_model_time_load_infer_post_s": row_total_model_s,
@@ -184,6 +191,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "peak_ram_mb": peak_ram_mb,
                     "ram_auc_mb_s": row_ram_auc,
                     "peak_gpu_memory_mb": peak_gpu_mb,
+                    "gpu_memory_auc_mb_s": row_gpu_auc,
                 }
             )
 
@@ -254,6 +262,9 @@ def _summarize_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         auc_rows = [r for r in grp_rows if r.get("ram_auc_mb_s", "") not in ("", None)]
         auc_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in auc_rows}
         ram_aucs = [float(r["ram_auc_mb_s"]) for r in auc_rows]
+        gpu_auc_rows = [r for r in grp_rows if r.get("gpu_memory_auc_mb_s", "") not in ("", None)]
+        gpu_auc_cases = {(str(r.get("dataset", "")), str(r.get("case_id", ""))) for r in gpu_auc_rows}
+        gpu_aucs = [float(r["gpu_memory_auc_mb_s"]) for r in gpu_auc_rows]
         rams = [float(r["peak_ram_mb"]) for r in grp_rows if r.get("peak_ram_mb", "") not in ("", None)]
         gpus = [float(r["peak_gpu_memory_mb"]) for r in grp_rows if r.get("peak_gpu_memory_mb", "") not in ("", None)]
         summaries.append(
@@ -271,6 +282,9 @@ def _summarize_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     round(sum(ram_aucs) / len(auc_cases), 1) if ram_aucs and auc_cases else None
                 ),
                 "max_peak_gpu_memory_mb": round(max(gpus), 1) if gpus else None,
+                "mean_case_gpu_memory_auc_mb_s": (
+                    round(sum(gpu_aucs) / len(gpu_auc_cases), 1) if gpu_aucs and gpu_auc_cases else None
+                ),
             }
         )
     return summaries

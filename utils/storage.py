@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from .prompts import find_recist_slices, recist_length_mm
+from .prompts import axial_diameter_mm, find_recist_slices, recist_length_mm
 
 SCHEMA = "independent_instances_v2"
 
@@ -148,6 +148,10 @@ class IndependentPredictionWriter:
         ]
 
         recist_slices = find_recist_slices(self.recist)
+        sp = np.asarray(self.spacing, dtype=np.float64).ravel()
+        has_valid_xy = len(sp) >= 2 and bool(np.all(np.isfinite(sp[:2]))) and bool(np.all(sp[:2] > 0))
+        sx, sy = (float(sp[0]), float(sp[1])) if has_valid_xy else (0.0, 0.0)
+
         rows: list[dict[str, Any]] = []
         for k, lab in enumerate(self.ids):
             pred_voxels = pred_counts[lab]
@@ -158,26 +162,48 @@ class IndependentPredictionWriter:
                     rlen_mm = recist_length_mm(self.recist[zs[0]] == lab, self.spacing)
                 except ValueError:
                     rlen_mm = None
-            if self.gt is not None:
-                ng = 0
-                ni = 0
-                for zi in range(self.shape[0]):
+
+            pred_recist_mm: float | None = 0.0 if has_valid_xy else None
+            gt_recist_mm: float | None = (0.0 if has_valid_xy else None) if self.gt is not None else None
+            ng = 0 if self.gt is not None else None
+            ni = 0 if self.gt is not None else None
+            chan = self.channels[lab]
+
+            for zi in range(self.shape[0]):
+                p = chan[zi] != 0
+                p_any = bool(p.any())
+                if p_any and has_valid_xy:
+                    d_p = axial_diameter_mm(p, sx, sy)
+                    if pred_recist_mm is not None and d_p > pred_recist_mm:
+                        pred_recist_mm = d_p
+                if self.gt is not None:
                     g = self.gt[zi] == lab
-                    p = self.channels[lab][zi] != 0
-                    ng += int(g.sum())
-                    ni += int((g & p).sum())
+                    g_cnt = int(g.sum())
+                    if g_cnt:
+                        assert ng is not None and ni is not None
+                        ng += g_cnt
+                        if p_any:
+                            ni += int((g & p).sum())
+                        if has_valid_xy:
+                            d_g = axial_diameter_mm(g, sx, sy)
+                            if gt_recist_mm is not None and d_g > gt_recist_mm:
+                                gt_recist_mm = d_g
+
+            if self.gt is not None:
+                assert ng is not None and ni is not None
                 denom = ng + pred_voxels
-                dice = (2.0 * ni / denom) if denom > 0 else 1.0
+                dice: float | None = (2.0 * ni / denom) if denom > 0 else 1.0
             else:
-                ng = None
-                ni = None
                 dice = None
+
             rows.append(
                 dict(
                     channel_index=k,
                     gt_id=lab,
                     recist_id=lab if lab in self.prompt_ids else None,
-                    recist_length_mm=rlen_mm,
+                    ground_truth_recist_length_mm=gt_recist_mm,
+                    predicted_recist_length_mm=pred_recist_mm,
+                    recist_prompt_length_mm=rlen_mm,
                     prediction_id=lab,
                     status=statuses[k],
                     gt_voxels=ng,
