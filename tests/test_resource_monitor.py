@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 import time
 
 import numpy as np
+
+import utils.monitor as monitor_mod
 
 from utils.monitor import (
     CaseProfiler,
@@ -208,3 +212,90 @@ def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     rec_no_gpu["samples"] = dict(record["samples"], gpu_mb=[None] * len(record["samples"]["seconds"]))
     plots2 = plot_case(rec_no_gpu, tmp_path / "plots_nogpu")
     assert len(plots2) == 2
+
+
+def test_hpc_cpu_fallback_when_nvidia_smi_stub_fails(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+    monkeypatch.setattr(monitor_mod.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 9, stdout="", stderr="NVIDIA-SMI has failed")
+
+    monkeypatch.setattr(monitor_mod.subprocess, "run", fake_run)
+
+    sampler = PidGpuSampler(gpu_targets=None)
+    assert len(calls) == 1
+    assert sampler.backend == "none"
+    assert sampler.status == "unavailable"
+    assert sampler.read_mb({12345}) is None
+    assert len(calls) == 1
+
+    with CaseProfiler(device="cpu", sample_interval=0.02) as prof:
+        with prof.phase("model_loading_time"):
+            time.sleep(0.03)
+        record = prof.finalize(extra_metadata={"case_id": "hpc_cpu_01", "model_name": "EffMedSAM2"})
+
+    assert len(calls) == 2
+    m = record["metrics"]
+    assert m["gpu_monitor_status"] == "unavailable"
+    assert m["gpu_sanity_ok"] is None
+    assert m["MaxGPU_Mem_MB"] is None
+    assert m["AUC_GPU_Time_MB_s"] is None
+
+
+def test_nvidia_smi_fallback_kept_when_probe_succeeds(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+    monkeypatch.setattr(monitor_mod.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(monitor_mod.subprocess, "run", fake_run)
+
+    sampler = PidGpuSampler(gpu_targets=None)
+    assert sampler.backend == "nvidia-smi"
+    assert sampler.read_mb({12345}) == 0.0
+    assert sampler.status == "measured"
+
+
+def test_cuda_mode_preserves_query_failed_when_nvidia_smi_fails(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+    monkeypatch.setattr(monitor_mod.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 9, stdout="", stderr="NVIDIA-SMI has failed")
+
+    monkeypatch.setattr(monitor_mod.subprocess, "run", fake_run)
+
+    sampler = PidGpuSampler(gpu_targets=[0])
+    assert sampler.backend == "nvidia-smi"
+    assert sampler.read_mb({12345}) is None
+    assert sampler.status == "query_failed"
+
+
+def test_case_profiler_loop_no_lock_starvation_on_slow_sample(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+    monkeypatch.setattr(monitor_mod.shutil, "which", lambda name: None)
+
+    with CaseProfiler(device="cpu", sample_interval=0.01) as prof:
+        orig_read = prof._gpu_sampler.read_mb
+
+        def slow_read(pids):
+            time.sleep(0.025)
+            return orig_read(pids)
+
+        monkeypatch.setattr(prof._gpu_sampler, "read_mb", slow_read)
+        for phase_name in ("model_loading_time", "data_loading_time", "model_inference_time"):
+            with prof.phase(phase_name):
+                time.sleep(0.01)
+        record = prof.finalize(extra_metadata={"case_id": "slow_01", "model_name": "EffMedSAM2"})
+
+    t = record["timings"]
+    sum_phases = (
+        t.get("model_loading_time_s", 0.0)
+        + t.get("data_loading_time_s", 0.0)
+        + t.get("model_inference_time_s", 0.0)
+    )
+    assert t["total_end_to_end_time_including_io_s"] - sum_phases < 0.5

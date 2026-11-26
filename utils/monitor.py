@@ -228,11 +228,51 @@ class PidGpuSampler:
             self._pynvml = None
             self._handles = []
             if self._nvidia_smi:
-                self.backend = "nvidia-smi"
-                if gpu_targets:
-                    self.monitored_physical_gpus = list(gpu_targets)
+                if gpu_targets is None:
+                    # HPC fallback: many CPU-only HPC compute nodes ship an OS-level
+                    # nvidia-smi binary without a GPU or NVIDIA driver. Probe once at
+                    # startup on CPU runs and degrade to backend="none" ("unavailable")
+                    # if the probe fails, avoiding repeated failing subprocess calls
+                    # and CPU/lock contention on single-core allocations.
+                    if self._probe_nvidia_smi():
+                        self.backend = "nvidia-smi"
+                else:
+                    self.backend = "nvidia-smi"
+                    if gpu_targets:
+                        self.monitored_physical_gpus = list(gpu_targets)
             elif self._target_resolution_failed:
                 self.backend = "none"
+
+    def _nvidia_smi_cmd(self) -> list[str]:
+        assert self._nvidia_smi is not None
+        cmd = [
+            self._nvidia_smi,
+            "--query-compute-apps=pid,used_gpu_memory",
+            "--format=csv,noheader,nounits",
+        ]
+        if self.gpu_targets:
+            cmd += ["-i", ",".join(str(t) for t in self.gpu_targets)]
+        return cmd
+
+    def _probe_nvidia_smi(self) -> bool:
+        """Probe nvidia-smi once so CPU-only HPC nodes without drivers degrade cleanly."""
+        if not self._nvidia_smi:
+            return False
+        try:
+            res = subprocess.run(
+                self._nvidia_smi_cmd(),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+        except Exception as exc:
+            self.last_error = repr(exc)
+            return False
+        if res.returncode != 0:
+            self.last_error = res.stderr.strip() or f"nvidia-smi rc={res.returncode}"
+            return False
+        return True
 
     def read_mb(self, pids: set[int]) -> float | None:
         if not pids:
@@ -281,13 +321,7 @@ class PidGpuSampler:
             return float(total_bytes / _MIB)
 
         if self.backend == "nvidia-smi" and self._nvidia_smi:
-            cmd = [
-                self._nvidia_smi,
-                "--query-compute-apps=pid,used_gpu_memory",
-                "--format=csv,noheader,nounits",
-            ]
-            if self.gpu_targets:
-                cmd += ["-i", ",".join(str(t) for t in self.gpu_targets)]
+            cmd = self._nvidia_smi_cmd()
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0, check=False)
                 if res.returncode != 0:
@@ -648,13 +682,20 @@ class CaseProfiler:
             self.samples.gpu_mb.append(round(gpu_mb, 3) if gpu_mb is not None else None)
 
     def _loop(self) -> None:
-        tick = 0
+        # HPC fallback: advance next_t past wall time whenever a sample overruns
+        # sample_interval (e.g., slow polling on 1-core CPU allocations) so the
+        # monitor thread never spins with delay=0 and starves self._lock at phase exits.
+        next_t = self._start_mono + self.sample_interval
         while True:
-            tick += 1
-            delay = max(0.0, self._start_mono + tick * self.sample_interval - time.monotonic())
+            now = time.monotonic()
+            delay = next_t - now
+            if delay <= 0.0:
+                delay = self.sample_interval
+                next_t = now + self.sample_interval
             if self._stop.wait(delay):
                 break
             self._sample_once()
+            next_t += self.sample_interval
 
     def _sync_cuda_if_needed(self) -> None:
         if not self.device.startswith("cuda"):
