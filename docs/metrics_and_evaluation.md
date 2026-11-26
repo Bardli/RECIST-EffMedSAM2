@@ -31,7 +31,9 @@ Runtime breakdown columns (seconds via `time.perf_counter()`, CUDA-synchronized 
 
 Each row in `results.csv` represents **one lesion**:
 - For a **single-lesion CT**, that single row records all phase timings, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s` directly.
-- For a **multi-lesion CT** (same model loaded once per CT volume), case-level shared metrics (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s`) are recorded on the **first lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT (or blank `""` if GPU memory was unmeasured), while each lesion row records its own `model_inference_time_s`, `postprocessing_time_s`, `ground_truth_recist_length_mm`, and `predicted_recist_length_mm`. Summing across rows gives the true cohort total without double-counting.
+- For a **multi-lesion CT** (same model loaded once per CT volume):
+  - Case-level shared timings (`model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`) are recorded on the **first prompted lesion row** of that CT and set to **`0.0`** on subsequent lesion rows of the same CT, while each lesion row records its own `model_inference_time_s`, `postprocessing_time_s`, `ground_truth_recist_length_mm`, and `predicted_recist_length_mm`.
+  - **`ram_auc_mb_s`** and **`gpu_memory_auc_mb_s`** are integrated over each subsequent prompted lesion's own execution time span (inference + postprocessing), and the first prompted lesion row holds the remainder (`case_total_auc - sum(other_lesions)` = shared load/IO/preprocess/save overhead + first lesion's execution span), while unprompted (`no_recist`) rows receive `0.0` (or blank `""` if GPU memory was unmeasured). Every active lesion gets its real positive AUC while summing across rows still equals the exact cohort total without double-counting.
 
 ### RAM & GPU Memory Metrics (Human-Readable CSVs vs. Full JSON Receipts)
 

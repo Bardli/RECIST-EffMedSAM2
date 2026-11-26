@@ -95,7 +95,7 @@ Run one case per selected method with strict `--num-threads 1` and `--plots`:
 ```
 Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full diagnostic JSON receipt (`runs/smoke_eff/metrics/<case_id>.metrics.json`):
 - In `runs/smoke_eff/results.csv`:
-  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (and on multi-lesion CTs, `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, `total_end_to_end_time_including_io_s`, `ram_auc_mb_s`, and `gpu_memory_auc_mb_s` are recorded on the 1st lesion row and `0.0` on subsequent lesion rows of the same CT, or blank if GPU memory is unmeasured).
+  - `total_model_time_load_infer_post_s` equals `model_loading_time_s + model_inference_time_s + postprocessing_time_s` (on multi-lesion CTs, shared timings `model_loading_time_s`, `data_loading_time_s`, `image_preprocessing_time_s`, `output_saving_time_s`, and `total_end_to_end_time_including_io_s` are recorded on the 1st prompted lesion row and `0.0` on subsequent rows, while `ram_auc_mb_s` and `gpu_memory_auc_mb_s` are integrated per prompted lesion span with the 1st lesion holding shared case overhead so the per-CT sum matches `AUC_*_Time_MB_s`; unmeasured GPU stays blank `""`).
   - `total_end_to_end_time_including_io_s >= total_model_time_load_infer_post_s` on the 1st lesion row.
   - `peak_ram_mb > 0`, `ram_auc_mb_s >= 0`, `ground_truth_recist_length_mm > 0`, and `predicted_recist_length_mm` / `predicted_volume_ml` / `dice_score` reflect the final saved output.
   - No intermediate `post_*` columns or `predictions_postprocessed/` directories are produced.

@@ -61,6 +61,23 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return list(reader.fieldnames or []), list(reader)
 
 
+def _lookup_lesion_float(
+    val_map: dict[str, Any],
+    recist_id: Any,
+    lesion_id: int,
+) -> float | None:
+    if not val_map:
+        return None
+    candidates: list[str] = []
+    if recist_id not in (None, ""):
+        candidates.append(str(recist_id))
+    candidates.append(str(lesion_id))
+    for key in candidates:
+        if key in val_map and val_map[key] not in ("", None):
+            return float(val_map[key])
+    return None
+
+
 def _lookup_lesion_time(
     time_map: dict[str, Any],
     recist_id: Any,
@@ -70,18 +87,55 @@ def _lookup_lesion_time(
 ) -> float:
     if not time_map:
         return round(case_total_s, 4) if is_first else 0.0
-    candidates: list[str] = []
-    if recist_id not in (None, ""):
-        candidates.append(str(recist_id))
-    candidates.append(str(lesion_id))
-    for key in candidates:
-        if key in time_map and time_map[key] not in ("", None):
-            return round(float(time_map[key]), 4)
-    return 0.0
+    found = _lookup_lesion_float(time_map, recist_id, lesion_id)
+    return round(found, 4) if found is not None else 0.0
+
+
+def _is_prompted_row(row: dict[str, Any]) -> bool:
+    if row.get("recist_id") not in (None, ""):
+        return True
+    status = str(row.get("status", ""))
+    return bool(status) and status != "no_recist"
+
+
+def _allocate_case_aucs(
+    rows: list[dict[str, Any]],
+    case_auc: Any,
+    per_lesion_auc_map: dict[str, Any],
+    row_active_durations: list[float],
+    case_wall_s: float,
+    first_idx: int,
+) -> list[Any]:
+    """Allocate span-integrated AUC per lesion so each active lesion gets its real AUC without double-counting."""
+    if case_auc is None:
+        return [""] * len(rows)
+    total_rounded = round(float(case_auc), 1)
+    if len(rows) == 1:
+        return [total_rounded]
+
+    alloc: list[float] = [0.0] * len(rows)
+    other_sum = 0.0
+    for i, r in enumerate(rows):
+        if i == first_idx:
+            continue
+        rid = r.get("recist_id")
+        gid = int(r["gt_id"])
+        span_auc = _lookup_lesion_float(per_lesion_auc_map, rid, gid)
+        if span_auc is not None:
+            val = round(span_auc, 1)
+        elif not per_lesion_auc_map and _is_prompted_row(r) and case_wall_s > 0.0 and row_active_durations[i] > 0.0:
+            val = round(float(case_auc) * (row_active_durations[i] / case_wall_s), 1)
+        else:
+            val = 0.0
+        alloc[i] = val
+        other_sum += val
+
+    alloc[first_idx] = round(max(0.0, total_rounded - other_sum), 1)
+    return alloc
 
 
 def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Flatten case records into human-readable per-lesion CSV rows using Option A shared metrics."""
+    """Flatten case records into human-readable per-lesion CSV rows without double-counting."""
     out_rows: list[dict[str, Any]] = []
 
     for record in records:
@@ -94,6 +148,8 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows = list(record.get("rows", []))
         lesion_inf_times = dict(record.get("per_lesion_inference_time_s", {}))
         lesion_post_times = dict(record.get("per_lesion_postprocessing_time_s", {}))
+        lesion_ram_aucs = dict(record.get("per_lesion_ram_auc_mb_s", {}))
+        lesion_gpu_aucs = dict(record.get("per_lesion_gpu_auc_mb_s", {}))
         voxel_ml = _voxel_volume_ml(spacing) if spacing else float("nan")
 
         case_load_s = float(metrics.get("model_loading_time_s") or 0.0)
@@ -141,11 +197,36 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             continue
 
+        first_idx = next((i for i, r in enumerate(rows) if _is_prompted_row(r)), 0)
         single_lesion_case = len(rows) == 1
+
+        row_inf_list: list[float] = []
+        row_post_list: list[float] = []
+        row_active_durations: list[float] = []
         for row_idx, r in enumerate(rows):
-            is_first = row_idx == 0
+            is_first = row_idx == first_idx
             gid = int(r["gt_id"])
             rid = r.get("recist_id")
+            if single_lesion_case:
+                r_inf = round(case_inf_s, 4)
+                r_post = round(case_post_s, 4)
+            else:
+                r_inf = _lookup_lesion_time(lesion_inf_times, rid, gid, case_inf_s, is_first)
+                r_post = _lookup_lesion_time(lesion_post_times, rid, gid, case_post_s, is_first)
+            row_inf_list.append(r_inf)
+            row_post_list.append(r_post)
+            row_active_durations.append(r_inf + r_post)
+
+        ram_aucs = _allocate_case_aucs(
+            rows, case_auc_ram, lesion_ram_aucs, row_active_durations, case_wall_s, first_idx
+        )
+        gpu_aucs = _allocate_case_aucs(
+            rows, case_auc_gpu, lesion_gpu_aucs, row_active_durations, case_wall_s, first_idx
+        )
+
+        for row_idx, r in enumerate(rows):
+            is_first = row_idx == first_idx
+            gid = int(r["gt_id"])
             gt_vox = r.get("gt_voxels")
             pred_vox = r.get("pred_voxels")
             gt_vol_ml = round(gt_vox * voxel_ml, 4) if (gt_vox is not None and np.isfinite(voxel_ml)) else ""
@@ -156,16 +237,8 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_pre_s = round(case_pre_s, 4) if is_first else 0.0
             row_save_s = round(case_save_s, 4) if is_first else 0.0
             row_wall_s = round(case_wall_s, 4) if is_first else 0.0
-            row_ram_auc = _fmt_float(case_auc_ram, 1) if is_first else (0.0 if case_auc_ram is not None else "")
-            row_gpu_auc = _fmt_float(case_auc_gpu, 1) if is_first else (0.0 if case_auc_gpu is not None else "")
-
-            if single_lesion_case:
-                row_inf_s = round(case_inf_s, 4)
-                row_post_s = round(case_post_s, 4)
-            else:
-                row_inf_s = _lookup_lesion_time(lesion_inf_times, rid, gid, case_inf_s, is_first)
-                row_post_s = _lookup_lesion_time(lesion_post_times, rid, gid, case_post_s, is_first)
-
+            row_inf_s = row_inf_list[row_idx]
+            row_post_s = row_post_list[row_idx]
             row_total_model_s = round(row_load_s + row_inf_s + row_post_s, 4)
 
             out_rows.append(
@@ -189,9 +262,9 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "output_saving_time_s": row_save_s,
                     "total_end_to_end_time_including_io_s": row_wall_s,
                     "peak_ram_mb": peak_ram_mb,
-                    "ram_auc_mb_s": row_ram_auc,
+                    "ram_auc_mb_s": ram_aucs[row_idx],
                     "peak_gpu_memory_mb": peak_gpu_mb,
-                    "gpu_memory_auc_mb_s": row_gpu_auc,
+                    "gpu_memory_auc_mb_s": gpu_aucs[row_idx],
                 }
             )
 

@@ -1,8 +1,8 @@
 """Moving-centroid XY disk clipping postprocessing (saves final predictions only)."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
-import time
 
 import cv2
 import numpy as np
@@ -199,19 +199,18 @@ def apply_moving_centroid_to_writer(
                     )
                 )
                 continue
-            t0 = time.perf_counter()
-            post_writer.mark_attempted(lab)
-            clipped, row = xy_centroid_clip_channel(
-                writer.channels[lab],
-                writer.recist,
-                int(lab),
-                writer.spacing,
-                endpoint=endpoints.get(int(lab)),
-                exempt=int(lab) in exempt_ids,
-            )
-            post_writer.write_volume(lab, clipped)
-            if profiler is not None:
-                profiler.record_lesion_postprocess_time(lab, time.perf_counter() - t0)
+            ctx = profiler.lesion_postprocess(lab) if profiler is not None else nullcontext()
+            with ctx:
+                post_writer.mark_attempted(lab)
+                clipped, row = xy_centroid_clip_channel(
+                    writer.channels[lab],
+                    writer.recist,
+                    int(lab),
+                    writer.spacing,
+                    endpoint=endpoints.get(int(lab)),
+                    exempt=int(lab) in exempt_ids,
+                )
+                post_writer.write_volume(lab, clipped)
             actions.append(row)
     except BaseException:
         post_writer.close()

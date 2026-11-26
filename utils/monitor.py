@@ -90,6 +90,49 @@ def _auc(seconds: list[float], values: list[float]) -> float:
     return float(_trapezoid(values[:n], seconds[:n]))
 
 
+def _auc_over_spans(
+    seconds: list[float],
+    values: list[float],
+    spans: list[tuple[float, float]],
+) -> float:
+    """Integrate the sampled piecewise-linear curve over ``spans`` by exact linear interpolation."""
+    n = min(len(seconds), len(values))
+    if n < 2 or not spans:
+        return 0.0
+
+    intervals = sorted((float(a), float(b)) for a, b in spans if float(b) > float(a))
+    if not intervals:
+        return 0.0
+    merged: list[list[float]] = [[intervals[0][0], intervals[0][1]]]
+    for a, b in intervals[1:]:
+        if a <= merged[-1][1]:
+            if b > merged[-1][1]:
+                merged[-1][1] = b
+        else:
+            merged.append([a, b])
+
+    area = 0.0
+    for i in range(n - 1):
+        t0, t1 = float(seconds[i]), float(seconds[i + 1])
+        dt = t1 - t0
+        if dt <= 0.0:
+            continue
+        v0, v1 = float(values[i]), float(values[i + 1])
+        slope = (v1 - v0) / dt
+        for a, b in merged:
+            if b <= t0:
+                continue
+            if a >= t1:
+                break
+            lo = t0 if t0 > a else a
+            hi = t1 if t1 < b else b
+            if hi > lo:
+                v_lo = v0 + slope * (lo - t0)
+                v_hi = v0 + slope * (hi - t0)
+                area += 0.5 * (v_lo + v_hi) * (hi - lo)
+    return float(area)
+
+
 def resolve_physical_gpu_targets(
     device: str,
     physical_gpu_index: int | None = None,
@@ -479,6 +522,7 @@ class CaseProfiler:
         self.samples = Samples(interval=self.sample_interval)
         self.timings: dict[str, float] = {}
         self.phase_spans: dict[str, list[tuple[float, float]]] = {}
+        self.lesion_spans: dict[str, list[tuple[float, float]]] = {}
         self.per_lesion_inference_time_s: dict[str, float] = {}
         self.per_lesion_postprocessing_time_s: dict[str, float] = {}
 
@@ -641,6 +685,30 @@ class CaseProfiler:
     def record_lesion_postprocess_time(self, label_id: int, elapsed_s: float) -> None:
         self.per_lesion_postprocessing_time_s[str(int(label_id))] = round(float(elapsed_s), 6)
 
+    @contextmanager
+    def _lesion_span(self, label_id: int, target_dict: dict[str, float]):
+        key = str(int(label_id))
+        self._sync_cuda_if_needed()
+        t0_rel = time.monotonic() - self._start_mono
+        t0_perf = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync_cuda_if_needed()
+            dt = time.perf_counter() - t0_perf
+            t1_rel = time.monotonic() - self._start_mono
+            target_dict[key] = round(target_dict.get(key, 0.0) + dt, 6)
+            if t1_rel > t0_rel:
+                self.lesion_spans.setdefault(key, []).append((t0_rel, t1_rel))
+
+    def lesion_inference(self, label_id: int):
+        """Time and record execution spans for one lesion's pure inference."""
+        return self._lesion_span(label_id, self.per_lesion_inference_time_s)
+
+    def lesion_postprocess(self, label_id: int):
+        """Time and record execution spans for one lesion's postprocessing."""
+        return self._lesion_span(label_id, self.per_lesion_postprocessing_time_s)
+
     def finalize(
         self,
         extra_metadata: dict[str, Any] | None = None,
@@ -664,6 +732,27 @@ class CaseProfiler:
             gpu_monitor_backend=self._gpu_sampler.backend,
             gpu_queries_failed=self._gpu_sampler.queries_failed,
         )
+        per_lesion_ram_auc_mb_s = {
+            k: round(_auc_over_spans(self.samples.seconds, self.samples.ram_mb, spans), 3)
+            for k, spans in self.lesion_spans.items()
+        }
+        valid_gpu = [
+            (t, float(g))
+            for t, g in zip(self.samples.seconds, self.samples.gpu_mb)
+            if g is not None
+        ]
+        if metrics.get("AUC_GPU_Time_MB_s") is not None and len(valid_gpu) >= 2:
+            gpu_t = [t for t, _ in valid_gpu]
+            gpu_v = [g for _, g in valid_gpu]
+            per_lesion_gpu_auc_mb_s = {
+                k: round(_auc_over_spans(gpu_t, gpu_v, spans), 3)
+                for k, spans in self.lesion_spans.items()
+            }
+        elif metrics.get("AUC_GPU_Time_MB_s") is not None:
+            per_lesion_gpu_auc_mb_s = {k: 0.0 for k in self.lesion_spans}
+        else:
+            per_lesion_gpu_auc_mb_s = {}
+
         host = {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -692,8 +781,14 @@ class CaseProfiler:
                 k: [[round(a, 6), round(b, 6)] for a, b in spans]
                 for k, spans in self.phase_spans.items()
             },
+            "lesion_spans": {
+                k: [[round(a, 6), round(b, 6)] for a, b in spans]
+                for k, spans in self.lesion_spans.items()
+            },
             "per_lesion_inference_time_s": dict(self.per_lesion_inference_time_s),
             "per_lesion_postprocessing_time_s": dict(self.per_lesion_postprocessing_time_s),
+            "per_lesion_ram_auc_mb_s": per_lesion_ram_auc_mb_s,
+            "per_lesion_gpu_auc_mb_s": per_lesion_gpu_auc_mb_s,
             "metrics": metrics,
             "samples": {
                 "interval": self.samples.interval,

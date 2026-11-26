@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 from typing import Any
 
 # Configure device visibility and thread pools BEFORE importing PyTorch.
@@ -221,53 +220,46 @@ def main() -> int:
                     # 4. Pure model inference (counted in total_model_time_load_infer_post_s)
                     with profiler.phase("model_inference_time"):
                         for lab, z_mid, payload in prepared_prompts:
-                            if session.device.type == "cuda":
-                                torch.cuda.synchronize(session.device)
-                            t_lesion = time.perf_counter()
-
-                            session.reset_interactions()
-                            if args.prompt_mode == "box":
-                                x_min, y_min, x_max, y_max = payload
-                                session.add_bbox_interaction(
-                                    [[z_mid, z_mid + 1], [y_min, y_max + 1], [x_min, x_max + 1]],
-                                    include_interaction=True,
-                                )
-                            elif args.prompt_mode == "line":
-                                kind = payload[0]
-                                if kind == "crop":
-                                    _, crop, interaction_bbox = payload
-                                    session.add_scribble_interaction(
-                                        crop,
+                            with profiler.lesion_inference(lab):
+                                session.reset_interactions()
+                                if args.prompt_mode == "box":
+                                    x_min, y_min, x_max, y_max = payload
+                                    session.add_bbox_interaction(
+                                        [[z_mid, z_mid + 1], [y_min, y_max + 1], [x_min, x_max + 1]],
                                         include_interaction=True,
-                                        interaction_bbox=interaction_bbox,
                                     )
-                                else:
-                                    _, plane = payload
-                                    svol = np.zeros(recist.shape, dtype=np.uint8)
-                                    svol[z_mid] = plane
-                                    session.add_scribble_interaction(svol, include_interaction=True)
-                            else:
-                                pts_xy = payload
-                                if args.interaction == "progressive":
-                                    for px, py in pts_xy:
-                                        session.add_point_interaction((z_mid, int(py), int(px)), include_interaction=True)
-                                else:
-                                    order = list(range(len(pts_xy)))
-                                    order = order[1:] + order[:1]
-                                    for i in order:
-                                        px, py = pts_xy[i]
-                                        session.add_point_interaction(
-                                            (z_mid, int(py), int(px)),
+                                elif args.prompt_mode == "line":
+                                    kind = payload[0]
+                                    if kind == "crop":
+                                        _, crop, interaction_bbox = payload
+                                        session.add_scribble_interaction(
+                                            crop,
                                             include_interaction=True,
-                                            run_prediction=(i == 0),
+                                            interaction_bbox=interaction_bbox,
                                         )
+                                    else:
+                                        _, plane = payload
+                                        svol = np.zeros(recist.shape, dtype=np.uint8)
+                                        svol[z_mid] = plane
+                                        session.add_scribble_interaction(svol, include_interaction=True)
+                                else:
+                                    pts_xy = payload
+                                    if args.interaction == "progressive":
+                                        for px, py in pts_xy:
+                                            session.add_point_interaction((z_mid, int(py), int(px)), include_interaction=True)
+                                    else:
+                                        order = list(range(len(pts_xy)))
+                                        order = order[1:] + order[:1]
+                                        for i in order:
+                                            px, py = pts_xy[i]
+                                            session.add_point_interaction(
+                                                (z_mid, int(py), int(px)),
+                                                include_interaction=True,
+                                                run_prediction=(i == 0),
+                                            )
 
-                            writer.mark_attempted(lab)
-                            writer.write_volume(lab, session.target_buffer.cpu().numpy() > 0)
-
-                            if session.device.type == "cuda":
-                                torch.cuda.synchronize(session.device)
-                            profiler.record_lesion_time(lab, time.perf_counter() - t_lesion)
+                                writer.mark_attempted(lab)
+                                writer.write_volume(lab, session.target_buffer.cpu().numpy() > 0)
 
                     # 5. Save final NPZ
                     receipt = finalize_and_save_predictions(

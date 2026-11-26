@@ -10,6 +10,8 @@ from utils.monitor import (
     CaseProfiler,
     PidGpuSampler,
     Samples,
+    _auc,
+    _auc_over_spans,
     get_process_max_rss_mb,
     plot_case,
     ranking_gpu_memory,
@@ -128,6 +130,28 @@ def test_resolve_physical_gpu_targets():
     assert resolve_physical_gpu_targets("cuda:0", None, "") == []
 
 
+def test_auc_over_spans_interpolation_additivity_and_merge():
+    seconds = [0.0, 0.5, 1.0]
+    values = [100.0, 200.0, 100.0]
+
+    # Full span matches full trapezoidal AUC
+    assert np.isclose(_auc_over_spans(seconds, values, [(0.0, 1.0)]), _auc(seconds, values))
+    assert np.isclose(_auc_over_spans(seconds, values, [(0.0, 1.0)]), 150.0)
+
+    # Sub-interval shorter than sample spacing (0.1..0.3 inside 0.0..0.5) uses linear interpolation
+    # At t=0.1 -> v=120, t=0.3 -> v=160 -> mean=140 * 0.2 = 28.0
+    assert np.isclose(_auc_over_spans(seconds, values, [(0.1, 0.3)]), 28.0)
+
+    # Partitioning into adjacent spans is strictly additive
+    part_a = _auc_over_spans(seconds, values, [(0.0, 0.35)])
+    part_b = _auc_over_spans(seconds, values, [(0.35, 0.8)])
+    part_c = _auc_over_spans(seconds, values, [(0.8, 1.0)])
+    assert np.isclose(part_a + part_b + part_c, 150.0)
+
+    # Overlapping spans merge without double-counting
+    assert np.isclose(_auc_over_spans(seconds, values, [(0.0, 0.7), (0.3, 1.0)]), 150.0)
+
+
 def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     with CaseProfiler(device="cpu", sample_interval=0.03) as prof:
         with prof.phase("model_loading_time"):
@@ -138,10 +162,15 @@ def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
         with prof.phase("image_preprocessing_time"):
             time.sleep(0.02)
         with prof.phase("model_inference_time"):
-            time.sleep(0.05)
-            prof.record_lesion_time(1, 0.045)
+            with prof.lesion_inference(1):
+                time.sleep(0.035)
+            with prof.lesion_inference(2):
+                time.sleep(0.035)
         with prof.phase("postprocessing_time"):
-            time.sleep(0.03)
+            with prof.lesion_postprocess(1):
+                time.sleep(0.015)
+            with prof.lesion_postprocess(2):
+                time.sleep(0.015)
         with prof.phase("output_saving_time"):
             time.sleep(0.02)
         del buf
@@ -152,6 +181,12 @@ def test_case_profiler_cpu_with_postprocess_and_plots(tmp_path: Path):
     assert m["MaxRAM_MB"] > 0.0
     assert m["ram_inference_peak_mb"] > 0.0
     assert m["postprocessing_time_s"] >= 0.02
+    assert record["per_lesion_ram_auc_mb_s"]["1"] > 0.0
+    assert record["per_lesion_ram_auc_mb_s"]["2"] > 0.0
+    assert (
+        record["per_lesion_ram_auc_mb_s"]["1"] + record["per_lesion_ram_auc_mb_s"]["2"]
+        <= m["AUC_RAM_Time_MB_s"] + 1e-6
+    )
     assert np.isclose(
         m["total_model_time_load_infer_post_s"],
         m["model_loading_time_s"] + m["model_inference_time_s"] + m["postprocessing_time_s"],

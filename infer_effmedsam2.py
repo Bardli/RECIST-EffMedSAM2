@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import random
 import sys
-import time
 
 # Configure device visibility and thread pools BEFORE importing PyTorch.
 from utils.monitor import apply_thread_env, configure_device_env
@@ -244,32 +243,25 @@ def main() -> int:
                     with profiler.phase("model_inference_time"):
                         with torch.inference_mode():
                             for ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d in prepared_prompts:
-                                if torch_device.type == "cuda":
-                                    torch.cuda.synchronize(torch_device)
-                                t_lesion = time.perf_counter()
+                                with profiler.lesion_inference(ulab):
+                                    img_crop = img_tensor[z_lo : z_hi + 1]
+                                    writer.mark_attempted(ulab)
+                                    state = predictor.init_state(img_crop, video_height, video_width)
+                                    _, _, logits = predictor.add_new_points_or_box(
+                                        inference_state=state, frame_idx=z_mid, obj_id=1, box=box_2d
+                                    )
+                                    mask_prompt = (logits[0] > 0.0).squeeze(0).cpu().numpy().astype(np.uint8)
+                                    _, _, masks = predictor.add_new_mask(state, frame_idx=z_mid, obj_id=1, mask=mask_prompt)
+                                    writer.write_slice(ulab, z_mid_orig, (masks[0] > 0.0).cpu().numpy()[0])
+                                    for fi, _, lg in predictor.propagate_in_video(state, start_frame_idx=z_mid, reverse=False):
+                                        writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
 
-                                img_crop = img_tensor[z_lo : z_hi + 1]
-                                writer.mark_attempted(ulab)
-                                state = predictor.init_state(img_crop, video_height, video_width)
-                                _, _, logits = predictor.add_new_points_or_box(
-                                    inference_state=state, frame_idx=z_mid, obj_id=1, box=box_2d
-                                )
-                                mask_prompt = (logits[0] > 0.0).squeeze(0).cpu().numpy().astype(np.uint8)
-                                _, _, masks = predictor.add_new_mask(state, frame_idx=z_mid, obj_id=1, mask=mask_prompt)
-                                writer.write_slice(ulab, z_mid_orig, (masks[0] > 0.0).cpu().numpy()[0])
-                                for fi, _, lg in predictor.propagate_in_video(state, start_frame_idx=z_mid, reverse=False):
-                                    writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
-
-                                predictor.reset_state(state)
-                                state = predictor.init_state(img_crop, video_height, video_width)
-                                predictor.add_new_mask(state, frame_idx=z_mid, obj_id=1, mask=mask_prompt)
-                                for fi, _, lg in predictor.propagate_in_video(state, start_frame_idx=z_mid, reverse=True):
-                                    writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
-                                predictor.reset_state(state)
-
-                                if torch_device.type == "cuda":
-                                    torch.cuda.synchronize(torch_device)
-                                profiler.record_lesion_time(ulab, time.perf_counter() - t_lesion)
+                                    predictor.reset_state(state)
+                                    state = predictor.init_state(img_crop, video_height, video_width)
+                                    predictor.add_new_mask(state, frame_idx=z_mid, obj_id=1, mask=mask_prompt)
+                                    for fi, _, lg in predictor.propagate_in_video(state, start_frame_idx=z_mid, reverse=True):
+                                        writer.write_slice(ulab, z_lo + int(fi), (lg[0] > 0.0).cpu().numpy()[0])
+                                    predictor.reset_state(state)
 
                     # 5. Final postprocess (counted in total_model_time_load_infer_post_s) + save final NPZ only
                     receipt = finalize_and_save_predictions(

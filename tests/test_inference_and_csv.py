@@ -366,6 +366,7 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     assert c1["gpu_memory_auc_mb_s"] == "0.0"
 
     # Unavailable GPU case (case_02): peak_gpu_memory_mb & gpu_memory_auc_mb_s stay blank "" (never 0.0)
+    # Multi-lesion RAM AUC: both active lesions receive positive AUC and sum == case AUC total
     c2_l1, c2_l2 = eff_rows[1], eff_rows[2]
     assert c2_l1["ground_truth_recist_length_mm"] == "18.2"
     assert c2_l1["predicted_recist_length_mm"] == "17.5"
@@ -375,17 +376,30 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     assert c2_l1["gpu_memory_auc_mb_s"] == ""
     assert c2_l2["peak_gpu_memory_mb"] == ""
     assert c2_l2["gpu_memory_auc_mb_s"] == ""
-    assert float(c2_l1["ram_auc_mb_s"]) == round(950.0 * 2.72, 1)
-    assert float(c2_l2["ram_auc_mb_s"]) == 0.0
+    assert float(c2_l1["ram_auc_mb_s"]) > 0.0
+    assert float(c2_l2["ram_auc_mb_s"]) > 0.0
+    assert np.isclose(
+        float(c2_l1["ram_auc_mb_s"]) + float(c2_l2["ram_auc_mb_s"]),
+        round(950.0 * 2.72, 1),
+    )
     assert float(c2_l2["model_loading_time_s"]) == 0.0
 
-    # CUDA multi-lesion case: Option A applies identically to gpu_memory_auc_mb_s
+    # CUDA multi-lesion case: both lesions have positive RAM & GPU AUC, sums equal case totals
     with eff_gpu_csv.open() as f:
         gpu_rows = list(csv.DictReader(f))
     assert gpu_rows[0]["peak_gpu_memory_mb"] == "2200.0"
-    assert float(gpu_rows[0]["gpu_memory_auc_mb_s"]) == round(2200.04 * 0.90, 1)
-    assert float(gpu_rows[1]["gpu_memory_auc_mb_s"]) == 0.0
-    assert float(gpu_rows[1]["ram_auc_mb_s"]) == 0.0
+    assert float(gpu_rows[0]["gpu_memory_auc_mb_s"]) > 0.0
+    assert float(gpu_rows[1]["gpu_memory_auc_mb_s"]) > 0.0
+    assert np.isclose(
+        float(gpu_rows[0]["gpu_memory_auc_mb_s"]) + float(gpu_rows[1]["gpu_memory_auc_mb_s"]),
+        round(2200.04 * 0.90, 1),
+    )
+    assert float(gpu_rows[0]["ram_auc_mb_s"]) > 0.0
+    assert float(gpu_rows[1]["ram_auc_mb_s"]) > 0.0
+    assert np.isclose(
+        float(gpu_rows[0]["ram_auc_mb_s"]) + float(gpu_rows[1]["ram_auc_mb_s"]),
+        round(1200.0 * 0.90, 1),
+    )
 
     # Failed case fallback row
     c3 = eff_rows[3]
@@ -466,3 +480,76 @@ def test_single_csv_option_a_and_vertical_concat_merge_cli(tmp_path: Path):
     )
     assert res2.returncode == 0, res2.stderr
     assert custom_csv.is_file()
+
+
+def test_multilesion_profiler_end_to_end_ram_auc_per_lesion_and_no_recist(tmp_path: Path):
+    shape = (8, 48, 48)
+    gt = np.zeros(shape, dtype=np.uint16)
+    recist = np.zeros(shape, dtype=np.uint16)
+    spacing = np.array([1.0, 1.0, 2.0], dtype=np.float32)
+
+    # Lesion 1: GT without RECIST (no_recist -> active time & AUC must be 0.0, shared load goes to first prompted)
+    gt[2:4, 2:8, 2:8] = 1
+    # Lesion 2 & Lesion 3: GT + RECIST lines
+    gt[2:5, 12:22, 12:22] = 2
+    cv2.line(recist[3], (12, 17), (21, 17), 2, thickness=2)
+    gt[2:5, 28:38, 28:38] = 3
+    cv2.line(recist[3], (28, 33), (37, 33), 3, thickness=2)
+
+    out_dir = tmp_path / "multi_eff"
+    out_npz = out_dir / "predictions" / "multi.npz"
+
+    with CaseProfiler(device="cpu", sample_interval=0.02) as prof:
+        with prof.phase("model_loading_time"):
+            time.sleep(0.03)
+        with IndependentPredictionWriter(shape=shape, recist=recist, spacing=spacing, gt=gt, scratch=tmp_path) as writer:
+            with prof.phase("model_inference_time"):
+                for lab in (2, 3):
+                    with prof.lesion_inference(lab):
+                        writer.mark_attempted(lab)
+                        pred = (gt == lab).astype(np.uint8)
+                        writer.write_volume(lab, pred)
+                        time.sleep(0.04)
+
+            receipt = finalize_and_save_predictions(
+                writer,
+                out_npz,
+                profiler=prof,
+                postprocess="moving_centroid",
+                scratch=tmp_path,
+            )
+
+        rec = prof.finalize(
+            extra_metadata={
+                "dataset": "colon",
+                "case_id": "multi",
+                "model_name": "EffMedSAM2",
+                "device": "cpu",
+                "postprocess": "moving_centroid",
+                "num_threads": 1,
+                "n_lesions": len(receipt["instance_ids"]),
+                "shape_zyx": list(shape),
+                "spacing_xyz": spacing.tolist(),
+                "rows": receipt["rows"],
+                "status": "ok",
+                "error": "",
+            }
+        )
+
+    csv_path = write_model_csv([rec], out_dir)
+    with csv_path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert [r["lesion_id"] for r in rows] == ["1", "2", "3"]
+    # Lesion 1 (no_recist) gets 0.0 for all timings and AUC; Lesion 2 & Lesion 3 both get positive RAM AUC
+    r1, r2, r3 = rows
+    assert float(r1["model_loading_time_s"]) == 0.0
+    assert float(r1["ram_auc_mb_s"]) == 0.0
+    assert float(r2["model_loading_time_s"]) > 0.0
+    assert float(r3["model_loading_time_s"]) == 0.0
+    assert float(r2["ram_auc_mb_s"]) > 0.0
+    assert float(r3["ram_auc_mb_s"]) > 0.0
+    assert np.isclose(
+        float(r1["ram_auc_mb_s"]) + float(r2["ram_auc_mb_s"]) + float(r3["ram_auc_mb_s"]),
+        round(rec["metrics"]["AUC_RAM_Time_MB_s"], 1),
+        atol=0.11,
+    )
