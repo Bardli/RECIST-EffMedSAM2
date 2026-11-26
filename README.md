@@ -141,6 +141,39 @@ Finally, concatenate the per-model `results.csv` files directly into **one combi
 
 </details>
 
+#### Exempt specific Tiny lesions from moving-centroid clipping
+
+Exemption skips **only** the postprocessing disk clip: inference, storage, and same-ID
+scoring still run. Pass original positive lesion IDs, not zero-based channel indices.
+Without either flag the existing behavior is unchanged. No organ class is inferred.
+
+For a single input file (IDs `2` and `19` are examples):
+```bash
+.venv-sam/bin/python infer_effmedsam2.py -i data/inputs/case.npz -o runs/tiny_exempt \
+  --model-size tiny --postprocess moving_centroid --exempt-ids 2 19
+```
+
+For multiple cases use `--exempt-manifest exemptions.json` **instead of** `--exempt-ids`.
+The JSON maps the SHA256 of each **actual primary input NPZ** to the IDs exempt in that
+file. Use an explicit empty list for a case with no exemptions. Do not hash a window
+twin, a NIfTI, or the parent of a repacked input. Compute digests for example with
+`sha256sum data/inputs/*.npz`. Manifest shape (replace the sample key with a real digest):
+
+```json
+{"schema":"recist-exempt-v1","inputs":{"0000000000000000000000000000000000000000000000000000000000000000":[2,19]}}
+```
+
+Unknown input hashes or unknown/unprompted IDs cause the case to fail rather than silently
+clipping or scoring it. The two options require Tiny + moving centroid. Direct IDs cannot
+be applied directory-wide. Use separate output roots for same-named physical inputs.
+A manifest does **not** select lesions for inference or change CT window, box, or prompt.
+Keep private cohort manifests outside this public repository.
+
+When a policy is supplied, the prediction NPZ provenance and per-case metrics JSON
+record `postprocess_exempt_ids`, per-ID `postprocess_actions` (including
+`exempt_by_id` and removed voxels), the policy source and, for manifests, its SHA256.
+The native `results.csv` keeps the same columns and includes exempt lesions.
+
 For runtime/memory column definitions, merged CSV layout, and offline `pytest` verification, see [`docs/metrics_and_evaluation.md`](docs/metrics_and_evaluation.md).
 
 ---

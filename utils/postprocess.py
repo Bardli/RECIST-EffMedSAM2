@@ -224,17 +224,30 @@ def finalize_and_save_predictions(
     *,
     profiler,
     postprocess: str = "none",
+    exempt_ids: set[int] | None = None,
     overwrite: bool = False,
     scratch: str | Path | None = None,
 ) -> dict:
     """Optionally apply postprocessing inside ``profiler`` and save ONLY the final prediction NPZ."""
     post_writer: IndependentPredictionWriter | None = None
+    if exempt_ids is not None:
+        if postprocess != "moving_centroid":
+            raise ValueError("Exemptions require moving_centroid")
+        if not exempt_ids <= writer.prompt_ids:
+            raise ValueError(f"Unknown or unprompted exempt lesion IDs: {sorted(exempt_ids - writer.prompt_ids)}")
     try:
         if postprocess == "moving_centroid":
             with profiler.phase("postprocessing_time"):
-                post_writer, _ = apply_moving_centroid_to_writer(
-                    writer, profiler=profiler, scratch=scratch
+                post_writer, actions = apply_moving_centroid_to_writer(
+                    writer, profiler=profiler, scratch=scratch, exempt_ids=exempt_ids
                 )
+                if exempt_ids is not None:
+                    # Explicit IDs do not imply an anatomical diagnosis.
+                    for action in actions:
+                        if action["action"] == "exempt_lymph_node":
+                            action["action"] = "exempt_by_id"
+                    post_writer.metadata.update(postprocess_exempt_ids=sorted(exempt_ids),
+                                                postprocess_actions=actions)
             final_writer = post_writer
         elif postprocess == "none":
             final_writer = writer

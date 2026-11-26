@@ -20,7 +20,7 @@ Ask the user once **only** for details they have not already specified:
 1. **Input NPZ directory:** (default `data/inputs/`; optional pre-windowed SAM twins in `data/window_twins/` or `--window-dir`). Ask whether subdirectories should be scanned (`--recursive`).
 2. **Execution device:** `cpu` (default) or `cuda` with explicit `--gpu-index N`.
 3. **Models to run:** any subset or all of `infer_effmedsam2.py`, `infer_medsam2.py`, and `infer_nninteractive.py` (`--prompt-mode box | 3pt_25 | line`).
-4. **Postprocessing:** for `infer_effmedsam2.py`, `--postprocess moving_centroid` (default) or `none`.
+4. **Postprocessing:** for `infer_effmedsam2.py`, `--postprocess moving_centroid` (default) or `none`. For Tiny use `--exempt-ids` only with one explicit NPZ file, or `--exempt-manifest` for hash-bound case-local exemptions. See the README; do not reuse numeric IDs across cases.
 5. **Rollout gate:** confirm stopping after a **1-case smoke test (`--limit 1`)** for review before running the full cohort (default), unless the user explicitly asks for an unattended full run.
 
 ### Step 1: Preflight Check
