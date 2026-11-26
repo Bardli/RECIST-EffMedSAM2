@@ -10,6 +10,7 @@ import random
 import sys
 
 # Configure device visibility and thread pools BEFORE importing PyTorch.
+from utils.exemptions import load_policy
 from utils.monitor import apply_thread_env, configure_device_env
 
 SEED = 2024
@@ -63,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="moving_centroid",
         help="Postprocessing applied before saving final prediction (default: moving_centroid)",
     )
+    policy = ap.add_mutually_exclusive_group()
+    policy.add_argument("--exempt-ids", type=int, nargs="+", metavar="ID",
+                        help="Tiny: skip moving-centroid clipping for these original lesion IDs (single input file)")
+    policy.add_argument("--exempt-manifest", type=Path, metavar="JSON",
+                        help="Tiny: per-input SHA256 to exempt ID lists (recist-exempt-v1)")
     ap.add_argument("--shift", type=int, default=0, help="Box padding in pixels")
     ap.add_argument("--gt-key", choices=("auto", "gts", "gts_hidden"), default="auto")
     ap.add_argument("--gts-path", type=Path, default=None)
@@ -84,6 +90,10 @@ def main() -> int:
     if args.num_threads < 1:
         raise SystemExit("--num-threads must be >= 1")
 
+    try:
+        policy = load_policy(args)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Invalid exemption policy: {exc}") from exc
     configure_device_env(args.device, args.gpu_index)
     apply_thread_env(args.num_threads)
 
@@ -128,6 +138,9 @@ def main() -> int:
     model_name = args.model_name or ("EffMedSAM2" if args.model_size == "tiny" else "EffMedSAM2_small")
     window_dir = auto_window_dir(args.input_dir, args.window_dir)
     cases = discover_cases(args.input_dir, limit=args.limit, recursive=args.recursive)
+
+    if policy is not None and len({p.stem for p in cases}) != len(cases):
+        raise SystemExit("Duplicate input basenames: use separate run directories for these cases")
 
     out_dir = args.output_dir.resolve()
     pred_dir = out_dir / "predictions"
@@ -219,6 +232,12 @@ def main() -> int:
                         box_2d = recist_bbox(recist_2d, scale=BOX_SCALE, shift=args.shift)
                         prepared_prompts.append((ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d))
 
+                source_sha = sha256(case_path)
+                exempt_ids = policy.ids_for(source_sha, set(slices_by_label)) if policy is not None else None
+                policy_info = {} if policy is None else {
+                    "exemption_source": "manifest" if policy.by_input is not None else "cli",
+                    "exemption_manifest_sha256": policy.manifest_sha256,
+                }
                 metadata = {
                     "dataset": dataset_label,
                     "case_id": case_id,
@@ -226,7 +245,8 @@ def main() -> int:
                     "device": args.device,
                     "postprocess": args.postprocess,
                     "source_npz": str(case_path),
-                    "source_sha256": sha256(case_path),
+                    "source_sha256": source_sha,
+                    **policy_info,
                     "checkpoint_path": str(ckpt_path),
                     "checkpoint_sha256": ckpt_sha,
                 }
@@ -269,6 +289,7 @@ def main() -> int:
                         out_npz,
                         profiler=profiler,
                         postprocess=args.postprocess,
+                        exempt_ids=exempt_ids,
                         overwrite=args.overwrite,
                         scratch=args.scratch,
                     )
@@ -292,6 +313,12 @@ def main() -> int:
                         "shape_zyx": list(img_3d.shape),
                         "spacing_xyz": [float(s) for s in spacing],
                         "rows": receipt["rows"],
+                        **({
+                            **policy_info,
+                            "source_sha256": source_sha,
+                            "postprocess_exempt_ids": receipt["postprocess_exempt_ids"],
+                            "postprocess_actions": receipt["postprocess_actions"],
+                        } if policy is not None else {}),
                         "status": "ok",
                         "error": "",
                     },
