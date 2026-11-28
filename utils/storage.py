@@ -57,6 +57,7 @@ class IndependentPredictionWriter:
         gt: np.ndarray | None = None,
         metadata: dict[str, Any] | None = None,
         scratch: str | Path | None = None,
+        only_ids: set[int] | None = None,
     ) -> None:
         if len(shape) != 3 or recist.shape != tuple(shape):
             raise ValueError(f"Expected 3D shape matching recist {recist.shape}, got {shape}")
@@ -76,6 +77,13 @@ class IndependentPredictionWriter:
                 raise ValueError("RECIST contains label ID absent from GT")
         else:
             self.ids = sorted(self.prompt_ids)
+
+        self.only_ids = only_ids
+        if only_ids is not None:
+            if not only_ids or not only_ids <= self.prompt_ids:
+                raise ValueError("Subset writer requires confirmed IDs present in the source RECIST")
+            self.prompt_ids = set(only_ids)
+            self.ids = sorted(only_ids)
 
         self.seen: set[int] = set()
         self.saved = False

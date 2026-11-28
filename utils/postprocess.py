@@ -69,6 +69,7 @@ def xy_centroid_clip_channel(
     spacing: np.ndarray,
     endpoint: dict | None = None,
     exempt: bool = False,
+    nodal_length_mm: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Clip one independent binary 3D mask ``[Z, Y, X]`` using its RECIST prompt."""
     sp = np.asarray(spacing, dtype=np.float64).ravel()
@@ -99,7 +100,11 @@ def xy_centroid_clip_channel(
     z0 = seeds[0]
     row["seed_z"] = z0
 
-    if endpoint is not None:
+    if nodal_length_mm is not None:
+        if endpoint is not None or not np.isfinite(nodal_length_mm) or nodal_length_mm <= 0:
+            raise ValueError("Invalid derived nodal length")
+        length_mm = nodal_length_mm
+    elif endpoint is not None:
         try:
             length_mm = prompt_length(recist_3d, label_id, z0, sp, endpoint)
         except ValueError as exc:
@@ -169,6 +174,7 @@ def apply_moving_centroid_to_writer(
     scratch: str | Path | None = None,
     endpoints: dict[int, dict] | None = None,
     exempt_ids: set[int] | None = None,
+    nodal_lengths: dict[int, float] | None = None,
 ) -> tuple[IndependentPredictionWriter, list[dict]]:
     """Apply moving-centroid clipping directly from disk-backed channels without NPZ reload."""
     endpoints = endpoints or {}
@@ -180,6 +186,7 @@ def apply_moving_centroid_to_writer(
         spacing=writer.spacing,
         gt=writer.gt,
         metadata=post_meta,
+        only_ids=writer.only_ids,
         scratch=scratch,
     )
     actions: list[dict] = []
@@ -209,6 +216,7 @@ def apply_moving_centroid_to_writer(
                     writer.spacing,
                     endpoint=endpoints.get(int(lab)),
                     exempt=int(lab) in exempt_ids,
+                    nodal_length_mm=(nodal_lengths or {}).get(lab),
                 )
                 post_writer.write_volume(lab, clipped)
             actions.append(row)
@@ -225,11 +233,14 @@ def finalize_and_save_predictions(
     profiler,
     postprocess: str = "none",
     exempt_ids: set[int] | None = None,
+    nodal_lengths: dict[int, float] | None = None,
     overwrite: bool = False,
     scratch: str | Path | None = None,
 ) -> dict:
     """Optionally apply postprocessing inside ``profiler`` and save ONLY the final prediction NPZ."""
     post_writer: IndependentPredictionWriter | None = None
+    if nodal_lengths is not None and (set(nodal_lengths) != writer.prompt_ids or exempt_ids is not None or postprocess != "moving_centroid"):
+        raise ValueError("Nodal clipping requires one derived length per selected ID and no exemption")
     if exempt_ids is not None:
         if postprocess != "moving_centroid":
             raise ValueError("Exemptions require moving_centroid")
@@ -239,8 +250,10 @@ def finalize_and_save_predictions(
         if postprocess == "moving_centroid":
             with profiler.phase("postprocessing_time"):
                 post_writer, actions = apply_moving_centroid_to_writer(
-                    writer, profiler=profiler, scratch=scratch, exempt_ids=exempt_ids
+                    writer, profiler=profiler, scratch=scratch, exempt_ids=exempt_ids, nodal_lengths=nodal_lengths
                 )
+                if nodal_lengths is not None:
+                    post_writer.metadata["postprocess_actions"] = actions
                 if exempt_ids is not None:
                     # Explicit IDs do not imply an anatomical diagnosis.
                     for action in actions:

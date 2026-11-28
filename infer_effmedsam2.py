@@ -46,10 +46,10 @@ def resolve_cfg(cfg: str | None, model_size: str) -> str:
     return "/" + str(cand)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, nodal: bool = False) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-i", "--input-dir", type=Path, default=Path("data/inputs"), help="Input NPZ file or folder")
-    ap.add_argument("-o", "--output-dir", type=Path, default=Path("runs/EffMedSAM2"), help="Output folder")
+    ap.add_argument("-i", "--input-dir", type=Path, required=nodal, default=Path("data/inputs"), help="Input NPZ file or folder")
+    ap.add_argument("-o", "--output-dir", type=Path, required=nodal, default=Path("runs/EffMedSAM2"), help="Output folder")
     ap.add_argument("--checkpoint", type=Path, default=None, help="Path to checkpoint (.pt)")
     ap.add_argument("--model-size", choices=("tiny", "small"), default="tiny")
     ap.add_argument("--cfg", type=str, default=None, help="Optional YAML config override")
@@ -82,11 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--scratch", type=Path, default=None)
     ap.add_argument("--plots", action="store_true", help="Save CPU/RAM/GPU-vs-time plots")
     ap.add_argument("--overwrite", action="store_true")
+    if nodal:
+        ap.add_argument("--nodal-manifest", required=True, type=Path, help="Hash-bound confirmed short-axis IDs for this input")
     return ap
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv=None, *, nodal: bool = False) -> int:
+    args = build_parser(nodal=nodal).parse_args(argv)
     if args.num_threads < 1:
         raise SystemExit("--num-threads must be >= 1")
 
@@ -98,6 +100,8 @@ def main() -> int:
     apply_thread_env(args.num_threads)
 
     import numpy as np
+    from utils.nodal import bind_request, derived_geometry
+    nodal_ids, nodal_meta = bind_request(args) if nodal else (None, {})
     import torch
     from efficient_track_anything.build_efficienttam import build_efficienttam_video_predictor_npz
 
@@ -217,19 +221,32 @@ def main() -> int:
                     img_tensor /= torch.tensor(IMAGENET_STD, dtype=torch.float32)[:, None, None]
 
                     slices_by_label = find_recist_slices(recist)
+                    axes = {}
+                    if nodal_ids is not None:
+                        if not nodal_ids <= set(slices_by_label):
+                            raise ValueError("Unknown or unprompted confirmed lesion IDs")
+                        slices_by_label = {i: slices_by_label[i] for i in sorted(nodal_ids)}
                     prepared_prompts: list[tuple[int, int, int, int, int, np.ndarray]] = []
                     for ulab, z_indices in slices_by_label.items():
                         if len(z_indices) != 1:
                             raise ValueError(f"Expected 1 RECIST slice for ID {ulab}, got {z_indices}")
                         z_mid_orig = z_indices[0]
                         recist_2d = (recist[z_mid_orig] == ulab).astype(np.uint8)
-                        diameter = recist_diameter(recist_2d)
+                        if nodal:
+                            axes[ulab] = derived_geometry(recist_2d, spacing, z_mid_orig)
+                            diameter = axes[ulab]["diameter_px"]
+                        else:
+                            diameter = recist_diameter(recist_2d)
                         z_span = diameter * (((spacing[0] + spacing[1]) / 2.0) / spacing[2])
                         half_z = int(z_span * Z_SLAB_SCALE / 2.0)
                         z_lo = max(0, z_mid_orig - half_z)
                         z_hi = min(img_3d.shape[0] - 1, z_mid_orig + half_z)
                         z_mid = z_mid_orig - z_lo
-                        box_2d = recist_bbox(recist_2d, scale=BOX_SCALE, shift=args.shift)
+                        if nodal:
+                            axes[ulab]["z_bounds_inclusive"] = [z_lo, z_hi]
+                            box_2d = np.array(axes[ulab]["box_xyxy"])
+                        else:
+                            box_2d = recist_bbox(recist_2d, scale=BOX_SCALE, shift=args.shift)
                         prepared_prompts.append((ulab, z_mid_orig, z_lo, z_hi, z_mid, box_2d))
 
                 source_sha = sha256(case_path)
@@ -244,6 +261,7 @@ def main() -> int:
                     "model_name": model_name,
                     "device": args.device,
                     "postprocess": args.postprocess,
+                    **({**nodal_meta, "nodal_geometry": axes} if nodal else {}),
                     "source_npz": str(case_path),
                     "source_sha256": source_sha,
                     **policy_info,
@@ -257,6 +275,7 @@ def main() -> int:
                     spacing=spacing,
                     gt=gts_3d,
                     metadata=metadata,
+                    only_ids=nodal_ids,
                     scratch=args.scratch,
                 ) as writer:
                     # 4. Pure model inference (counted in total_model_time_load_infer_post_s)
@@ -290,6 +309,7 @@ def main() -> int:
                         profiler=profiler,
                         postprocess=args.postprocess,
                         exempt_ids=exempt_ids,
+                        nodal_lengths={lab: a["nominal_mm"] for lab, a in axes.items()} if nodal else None,
                         overwrite=args.overwrite,
                         scratch=args.scratch,
                     )
@@ -313,6 +333,9 @@ def main() -> int:
                         "shape_zyx": list(img_3d.shape),
                         "spacing_xyz": [float(s) for s in spacing],
                         "rows": receipt["rows"],
+                        **({**nodal_meta, "nodal_geometry": axes, "source_sha256": metadata["source_sha256"],
+                            "checkpoint_sha256": ckpt_sha} if nodal else {}),
+                        **({"postprocess_actions": receipt["postprocess_actions"]} if nodal else {}),
                         **({
                             **policy_info,
                             "source_sha256": source_sha,

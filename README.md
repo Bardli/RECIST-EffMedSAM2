@@ -141,7 +141,7 @@ Finally, concatenate the per-model `results.csv` files directly into **one combi
 
 </details>
 
-For lymph-node inputs, see [which RECIST axis each model actually uses](docs/nodal_prompts.md). The released commands use the supplied prompt; a Tiny clipping exemption does not construct a long axis.
+**Confirmed lymph-node short axes:** use the dedicated [1.25× nodal command and manifest guide](docs/nodal_prompts.md): `infer_nodal.py tiny` or `infer_nodal.py medsam2`. These write new results only for selected IDs. The commands above and all nnInteractive prompts are unchanged; an exemption is not a long-axis conversion.
 
 #### Exempt specific Tiny lesions from moving-centroid clipping
 

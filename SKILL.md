@@ -23,7 +23,7 @@ Ask the user once **only** for details they have not already specified:
 4. **Postprocessing:** for `infer_effmedsam2.py`, `--postprocess moving_centroid` (default) or `none`. For Tiny use `--exempt-ids` only with one explicit NPZ file, or `--exempt-manifest` for hash-bound case-local exemptions. See the README; do not reuse numeric IDs across cases.
 5. **Rollout gate:** confirm stopping after a **1-case smoke test (`--limit 1`)** for review before running the full cohort (default), unless the user explicitly asks for an unattended full run.
 
-For lymph nodes, follow the [nodal prompt guide](docs/nodal_prompts.md) before the smoke test. If the requested protocol requires a derived long axis, report that this release does not implement it. Do not substitute a clipping exemption, silently change the scale, or edit input NPZs.
+For lymph nodes, follow the [nodal prompt guide](docs/nodal_prompts.md) before the smoke test. For verified short-axis lesions, use `infer_nodal.py tiny|medsam2` with the case- and window-hash-bound manifest in that guide. Use a fresh output directory per case/model/device. Do not infer eligibility from anatomy, reuse a clipping-exemption list, rewrite inputs, or change nnInteractive.
 
 ### Step 1: Preflight Check
 Inspect the host environment before creating venvs:
