@@ -141,6 +141,8 @@ Finally, concatenate the per-model `results.csv` files directly into **one combi
 
 </details>
 
+For lymph-node inputs, see [which RECIST axis each model actually uses](docs/nodal_prompts.md). The released commands use the supplied prompt; a Tiny clipping exemption does not construct a long axis.
+
 #### Exempt specific Tiny lesions from moving-centroid clipping
 
 Exemption skips **only** the postprocessing disk clip: inference, storage, and same-ID
