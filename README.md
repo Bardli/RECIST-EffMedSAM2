@@ -1,6 +1,6 @@
 # RECIST-EffMedSAM2
 
-A clean, standalone inference and efficiency-benchmarking repository for **3D CT lesion segmentation from 2D RECIST annotations** across **EffMedSAM2**, **MedSAM2**, and **nnInteractive** — organized as simple standalone Python scripts (`infer_effmedsam2.py`, `infer_medsam2.py`, `infer_nninteractive.py`, and `merge_csvs.py`) with no package installation or wrapper shell layers required.
+A clean, standalone inference and efficiency-benchmarking repository for **3D CT lesion segmentation from 2D RECIST annotations** across **EffMedSAM2**, **MedSAM2**, and **nnInteractive** — organized as simple standalone Python scripts (`infer_effmedsam2.py`, `infer_medsam2.py`, `infer_nninteractive.py`, `infer_nodal.py`, and `merge_csvs.py`) with no package installation or wrapper shell layers required.
 
 *Prefer letting an AI coding agent handle the setup?* Open the cloned folder in your agent and tell it to follow [`SKILL.md`](SKILL.md) — it will create the virtual environments, download and verify checkpoints, run a 1-case smoke test, and audit the output CSVs for you.
 
@@ -10,7 +10,7 @@ A clean, standalone inference and efficiency-benchmarking repository for **3D CT
 
 **Install only what you need:**
 
-- **`.venv-sam`** — for **`infer_effmedsam2.py`** and **`infer_medsam2.py`**.
+- **`.venv-sam`** — for **`infer_effmedsam2.py`**, **`infer_medsam2.py`**, and **`infer_nodal.py`**.
 - **`.venv-nn`** — for **`infer_nninteractive.py`**.
 
 We use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`uv venv` + `uv pip`) for fast environment setup and automatic Python 3.11 management *(standard `python3 -m venv` + `pip` remains compatible with all `requirements/*.txt` files on offline/HPC systems without `uv`)*. Both `requirements/sam.txt` and `requirements/nninteractive.txt` include `requirements/core.txt`, and every script imports directly from the repository root (`utils/`), so no `pip install -e .` is needed.
@@ -190,6 +190,8 @@ For runtime/memory column definitions, merged CSV layout, and offline `pytest` v
 | `nnInteractive_point` | [`infer_nninteractive.py`](infer_nninteractive.py) | 3 points center-out 25% (`--prompt-mode 3pt_25`) | None |
 | `nnInteractive_scribble` | [`infer_nninteractive.py`](infer_nninteractive.py) | Skeletonized line inset 3 px (`--prompt-mode line`) | None |
 | `EffMedSAM2_small` | [`infer_effmedsam2.py`](infer_effmedsam2.py) (`--model-size small`) | Square box from SVD diameter (Z-slab `1.6x`) | `moving_centroid` (configurable) |
+
+> **Opt-in 1.25× nodal protocol ([`infer_nodal.py`](infer_nodal.py), see [`docs/nodal_prompts.md`](docs/nodal_prompts.md)):** Dedicated single-CT subset CLI (`infer_nodal.py tiny` / `infer_nodal.py medsam2`) for lesions explicitly confirmed in a primary/window SHA-256-bound manifest (`confirmed-nodal-short-to-long-1.25-v1`). Constructs a `1.25×` physical perpendicular prompt for the Tiny box, `1.6×` Z-slab, and nominal `moving_centroid` clip radius (`MedSAM2`: box only, full-Z propagation, no clip); leaves `EffMedSAM2_small`, ordinary commands, and all `nnInteractive` prompts unchanged.
 
 ---
 

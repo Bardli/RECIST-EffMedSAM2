@@ -68,7 +68,7 @@ Skip `.venv-sam` or `.venv-nn` only if the user excluded that model family. No `
    ```
 
 ### Step 3: Offline Self-Test
-Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, standalone CLIs, single-CSV Option A reporting, and vertical CSV concatenation before running real checkpoints:
+Verify resource profiling, CT input loading, prompt geometry, final-only postprocessing, case-scoped Tiny exemptions (`tests/test_exemptions.py`), 1.25× nodal prompt geometry/manifest/subset output (`tests/test_nodal.py`), standalone CLIs, single-CSV Option A reporting, and vertical CSV concatenation before running real checkpoints:
 ```bash
 uv pip install --python .venv-sam/bin/python pytest
 .venv-sam/bin/pytest -v
@@ -108,6 +108,9 @@ Audit both the human-readable table (`runs/smoke_eff/results.csv`) and the full 
     - If running on a CPU-only machine without NVIDIA tooling (`metrics.gpu_monitor_status == "unavailable"`): confirm `metrics.gpu_sanity_ok is None` and `peak_gpu_memory_mb` / `gpu_memory_auc_mb_s` are blank in `results.csv` (not `0.0`).
     - Never accept `gpu_monitor_status` in `{"query_failed", "partial"}` as zero VRAM.
   - **On `--device cuda --gpu-index N`:** confirm `metrics.gpu_monitor_status == "measured"` and nonzero GPU usage on physical card `N`.
+- **If running [`infer_nodal.py`](infer_nodal.py) (`tiny` or `medsam2`):**
+  - Confirm a fresh output directory was created, `results.csv` contains **only** the `confirmed_short_axis_ids` from the manifest (never zero-fill unselected lesions in the same CT), and downstream joins match on `(case_id, lesion_id)` rather than row order.
+  - Confirm `metrics/<case_id>.metrics.json` and the prediction NPZ provenance record `nodal_protocol == "confirmed-nodal-short-to-long-1.25-v1"`, `nodal_manifest_sha256`, `window_sha256`, `confirmed_short_axis_ids`, and `nodal_geometry` (plus `postprocess_actions` with nominal clip radius for `tiny`).
 
 Unless the user explicitly requested an unattended full run in Step 0, share the 1-case `results.csv` summary and wait for confirmation before launching the full dataset.
 
@@ -132,11 +135,12 @@ Summarize observed results from:
 1. **Fresh model reload per case:** Model construction and checkpoint loading execute inside every case loop iteration, are counted in `total_model_time_load_infer_post_s` (`model_loading_time_s + model_inference_time_s + postprocessing_time_s`), and explicitly clean up (`del`, `gc.collect()`, `empty_cache()`) after each case.
 2. **Postprocessing inside profiler & final-only output:** `moving_centroid` postprocessing executes inside `CaseProfiler.phase("postprocessing_time")`, and only the final prediction NPZ and final Dice/volume columns are written.
 3. **RECIST prompt alignment:** Slice discovery (`find_recist_slices`) and 2D prompt extraction run inside `image_preprocessing_time_s` so `model_inference_time_s` and per-lesion timing cover pure inference symmetrically.
-3. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to keep host RAM bounded and timings stable.
-4. **Strict CPU isolation & physical GPU mapping:**
+4. **Serial single-threaded default (`--num-threads 1`):** Sets `torch.set_num_threads(1)`, `torch.set_num_interop_threads(1)`, and `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB/BLIS_NUM_THREADS=1` before importing PyTorch to keep host RAM bounded and timings stable.
+5. **Strict CPU isolation & physical GPU mapping:**
    - `--device cpu`: forces `CUDA_VISIBLE_DEVICES=""` and `NVIDIA_VISIBLE_DEVICES="void"` before importing PyTorch and asserts `torch.cuda.is_available() == False`, while querying **all** physical GPUs via NVML.
    - `--device cuda --gpu-index N`: sets `CUDA_VISIBLE_DEVICES=N` before importing PyTorch (calling `reset_cuda_peaks(torch_device)` on GPU cases) and passes physical index `N` to `CaseProfiler` so NVML monitors physical card `N`.
-5. **Failure telemetry & `gpu_monitor_status` semantics:** Stale `<case>.metrics.json` is cleared before each case; failed cases record `status="failed(exception)"` and observed RAM/GPU metrics. Never conflate unmeasured/failed NVML queries (`None` -> blank cell; `gpu_monitor_status` in `{"unavailable", "query_failed", "partial"}`) with a verified `0.0 MiB` measurement (`gpu_monitor_status == "measured"`).
+6. **Failure telemetry & `gpu_monitor_status` semantics:** Stale `<case>.metrics.json` is cleared before each case; failed cases record `status="failed(exception)"` and observed RAM/GPU metrics. Never conflate unmeasured/failed NVML queries (`None` -> blank cell; `gpu_monitor_status` in `{"unavailable", "query_failed", "partial"}`) with a verified `0.0 MiB` measurement (`gpu_monitor_status == "measured"`).
+7. **Opt-in 1.25× nodal subset invariant ([`infer_nodal.py`](infer_nodal.py)):** Operates on one primary CT and a fresh non-existing output directory per run, gated by primary and window SHA-256 hashes and explicit positive `confirmed_short_axis_ids`; never infers anatomy, overwrites outputs, or alters ordinary scripts and `nnInteractive`.
 
 ### 2. Input Channels: HU & Normalized/Windowed
 - **HU channel:** `nifti_stored_scaled_v1` reconstructs `float64` HU for `nnInteractive` and windows continuously to `float32 [0.0, 1.0]` (`L40/W400`) for `EffMedSAM2`/`MedSAM2`; direct unencoded `imgs` passes through to `nninteractive_image(..., require_raw=False)`.

@@ -63,11 +63,15 @@ Each standalone inference script produces **one concise CSV (`<output-dir>/resul
 
 Running `merge_csvs.py` performs a **plain vertical concatenation** of the per-model `results.csv` files into **one combined `merged_results.csv`** with the exact same 22 columns (no pivoting or column prefixes), while printing a compact per-model summary to stdout.
 
+### Subset Nodal Outputs (`infer_nodal.py`)
+
+When running confirmed short-axis nodal inference with [`infer_nodal.py`](../infer_nodal.py) (`tiny` or `medsam2`; see [`nodal_prompts.md`](nodal_prompts.md)), the output folder retains the exact 22-column `results.csv` schema but contains **only the manifest-selected `confirmed_short_axis_ids`** for that CT (non-selected lesion IDs are omitted from predictions and CSV rows, never zero-filled). Always join subset tables downstream by `(case_id, lesion_id)`, never by row position. Both `metrics/<case_id>.metrics.json` and the saved prediction NPZ metadata record `nodal_protocol` (`"confirmed-nodal-short-to-long-1.25-v1"`), `nodal_manifest_sha256`, `window_sha256`, `confirmed_short_axis_ids`, and `nodal_geometry` (`source_endpoints_xy`, `nominal_endpoints_xy`, `endpoints_xy`, `short_mm`, `nominal_mm`, `chord_mm`, `endpoint_clamped`, `box_xyxy`; plus `z_bounds_inclusive` and `postprocess_actions` for `tiny`).
+
 ---
 
 ## Running Tests
 
-Offline unit and end-to-end synthetic tests validate phase timing math (`total_model_time_load_infer_post_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), GT/predicted RECIST Feret diameter, FLARE-Efficiency `ram_auc_mb_s` and `gpu_memory_auc_mb_s` with multi-RECIST zeroing, human-readable 22-column CSV formatting alongside full JSON receipts, final-only postprocessing, `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and vertical CSV concatenation:
+Offline unit and end-to-end synthetic tests validate phase timing math (`total_model_time_load_infer_post_s = model_loading_time_s + model_inference_time_s + postprocessing_time_s`), GT/predicted RECIST Feret diameter, FLARE-Efficiency `ram_auc_mb_s` and `gpu_memory_auc_mb_s` with multi-RECIST zeroing, human-readable 22-column CSV formatting alongside full JSON receipts, final-only postprocessing, case-scoped Tiny exemptions (`tests/test_exemptions.py`), 1.25× nodal prompt geometry/manifest/subset output (`tests/test_nodal.py`), `gpu_monitor_status` (`measured` vs `query_failed` vs `unavailable`), physical GPU target resolution, independent-instance storage, prompt geometry, standalone script CLIs, and vertical CSV concatenation:
 
 ```bash
 uv pip install --python .venv-sam/bin/python pytest
